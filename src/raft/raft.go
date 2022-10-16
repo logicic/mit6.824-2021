@@ -23,9 +23,10 @@ import (
 	"sync/atomic"
 	"time"
 	"math/rand"
-	"fmt"
+	// "fmt"
 //	"6.824/labgob"
 	"6.824/labrpc"
+	log "github.com/sirupsen/logrus"
 )
 
 
@@ -195,7 +196,7 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
-	fmt.Printf("leader %d send heartbeat to %d in term %d at %v\n", args.LeaderId, rf.me, args.Term, time.Now())
+	log.Debugf("leader %d send heartbeat to %d in term %d at %v\n", args.LeaderId, rf.me, args.Term, time.Now())
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
@@ -208,7 +209,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	if rf.role != 2 {
 		rf.role = 2
-		fmt.Printf("AppendEntries :%d become follower!\n", rf.me)
+		log.Debugf("AppendEntries :%d become follower!\n", rf.me)
 	}
 
 	reply.Success = true
@@ -247,32 +248,26 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	fmt.Printf("!!!!call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
+	log.Debugf("!!!!call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.currentTerm >= args.Term {
-		fmt.Printf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+		log.Debugf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return 
 	}
 	if rf.votedFor > -1{
-		fmt.Printf("%d has voted %d\n", rf.me, rf.votedFor)
+		log.Debugf("%d has voted %d\n", rf.me, rf.votedFor)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return 
 	}
-	// if rf.role == 1 {
-	// 	// this server has vote to itself
-	// 	fmt.Printf("%d has voted itself\n", rf.me)
-	// 	reply.Term = rf.currentTerm
-	// 	reply.VoteGranted = false
-	// 	return 
-	// }
+
 	if rf.role == 0 {
 		// update role 
-		fmt.Printf("RequestVote :%d become follower!\n", rf.me)
+		log.Debugf("RequestVote :%d become follower!\n", rf.me)
 		rf.role = 2
 	}
 	// if rf.role != 2 {
@@ -281,7 +276,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 	reply.VoteGranted = false
 	// 	return 
 	// }
-	fmt.Printf("call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
+	log.Debugf("call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
 	rf.heartbeatCh <- struct{}{}
 	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
@@ -381,7 +376,7 @@ func (rf *Raft) doCandidate(){
 		rf.currentTerm++
 		currentTerm := rf.currentTerm
 		rf.votedFor = rf.me			// vote to myself
-		fmt.Printf("%d term:%d, role:%d\n", rf.me, rf.currentTerm, rf.role)
+		log.Debugf("%d term:%d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 		rf.mu.Unlock()
 		voteCountSuccess := int64(1)	// vote to myself
 		voteCountFailed := int64(0)
@@ -422,7 +417,7 @@ func (rf *Raft) doCandidate(){
 				rf.mu.Lock()
 				rf.votedFor = -1
 				rf.mu.Unlock()
-				fmt.Printf("%d requestTimeout:%v, now: %v\n",rf.me, requestTimeout, time.Now())
+				log.Debugf("%d requestTimeout:%v, now: %v\n",rf.me, requestTimeout, time.Now())
 				break
 			}
 			if atomic.LoadInt64(&voteCountSuccess) >= int64(rf.count/2+1){
@@ -430,7 +425,7 @@ func (rf *Raft) doCandidate(){
 				rf.votedFor = -1
 				if 1 == rf.role && currentTerm == rf.currentTerm{
 					// become leader
-					fmt.Printf("%d become leader!\n", rf.me)
+					log.Debugf("%d become leader!\n", rf.me)
 					rf.role = 0
 					rf.mu.Unlock()
 					go rf.doLeader()
@@ -441,7 +436,7 @@ func (rf *Raft) doCandidate(){
 			}
 			if atomic.LoadInt64(&voteCountFailed) >= int64(rf.count/2+1) || atomic.LoadInt64(&voteCountSuccess) + atomic.LoadInt64(&voteCountFailed) >= int64(rf.count){
 				// elect failed
-				fmt.Printf("%d elect failed! retry!\n", rf.me)
+				log.Debugf("%d elect failed! retry!\n", rf.me)
 				rf.mu.Lock()
 				rf.votedFor = -1
 				rf.mu.Unlock()
@@ -458,7 +453,7 @@ func (rf *Raft) doLeader(){
 	// leader
 	rf.mu.Lock()
 	currentTerm := rf.currentTerm
-	fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
+	log.Debugf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
 	rf.mu.Unlock()
 	for peerIndex := range rf.peers {
 		if peerIndex == rf.me {
@@ -471,14 +466,14 @@ func (rf *Raft) doLeader(){
 			}
 			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(pindex, args, reply)
-			fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
+			log.Debugf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
 			if ok {
 				if reply.Term > currentTerm{
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.role = 2
-						fmt.Printf("leader :%d become follower!\n", rf.me)
+						log.Debugf("leader :%d become follower!\n", rf.me)
 					}
 					rf.mu.Unlock()
 				}
@@ -499,12 +494,12 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		if _, isLeader := rf.GetState(); !isLeader{
 			electionTimeout := rand.Intn(300)+MeanArrivalTime
-			fmt.Printf("%d's random time is %v\n", rf.me, electionTimeout)
+			log.Debugf("%d's random time is %v\n", rf.me, electionTimeout)
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):	
 				go rf.doCandidate()
 			case <-rf.heartbeatCh:
-				fmt.Printf("%d recv heartbeat!\n", rf.me)
+				log.Debugf("%d recv heartbeat!\n", rf.me)
 			}
 		}else {
 			rf.doLeader()
@@ -526,6 +521,7 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	log.SetLevel(log.InfoLevel)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
