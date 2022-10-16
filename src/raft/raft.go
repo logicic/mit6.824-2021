@@ -491,6 +491,7 @@ func (rf *Raft) doLeader(){
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	MeanArrivalTime := 200
+	heartbeat := 100
 	for rf.killed() == false {
 
 		// Your code here to check if a leader election should
@@ -506,38 +507,8 @@ func (rf *Raft) ticker() {
 				fmt.Printf("%d recv heartbeat!\n", rf.me)
 			}
 		}else {
-			// leader
-			rf.mu.Lock()
-			currentTerm := rf.currentTerm
-			fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
-			rf.mu.Unlock()
-			for peerIndex := range rf.peers {
-				if peerIndex == rf.me {
-					continue
-				}
-				go func(pindex int){
-					args := &AppendEntriesArgs{
-						Term: currentTerm,
-						LeaderId: rf.me,
-					}
-					reply := &AppendEntriesReply{}
-					ok := rf.sendAppendEntries(pindex, args, reply)
-					fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
-					if ok {
-						if reply.Term > currentTerm{
-							rf.mu.Lock()
-							if reply.Term > rf.currentTerm {
-								rf.currentTerm = reply.Term
-								rf.role = 2
-								fmt.Printf("leader :%d become follower!\n", rf.me)
-							}
-							rf.mu.Unlock()
-						}
-					}
-				}(peerIndex)
-			}
-
-			time.Sleep(100*time.Millisecond)
+			rf.doLeader()
+			time.Sleep(time.Duration(heartbeat)*time.Millisecond)
 		}
 	}
 }
