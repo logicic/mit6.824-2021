@@ -494,121 +494,131 @@ func (rf *Raft) doLeader(){
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	// go func(){
-	// 	for rf.killed() == false{
-	// 		select {
-	// 		case role := <-rf.roleCh:
-	// 			fmt.Printf("%d role is %d\n", rf.me, role)
-	// 			if role == 1 {
-	// 				// candidate operation
-	// 				rf.mu.Lock()
-	// 				currentTerm := rf.currentTerm
-	// 				rf.votedFor = rf.me			// vote to myself
-	// 				rf.mu.Unlock()
-	// 				voteCountSuccess := int64(1)	// vote to myself
-	// 				voteCountFailed := int64(0)
-	// 				for peerIndex := range rf.peers{
-	// 					if peerIndex == rf.me {
-	// 						continue
-	// 					}
-	// 					args := &RequestVoteArgs{
-	// 						Term: currentTerm,
-	// 						CandidateId: rf.me,
-	// 					}
-	// 					reply := &RequestVoteReply{}
-	// 					go func(pindex int){
-	// 						if rf.sendRequestVote(pindex, args, reply){
-	// 							if reply.VoteGranted {
-	// 								// vote to me
-	// 								atomic.AddInt64(&voteCountSuccess,1)
+	go func(){
+		for rf.killed() == false{
+			select {
+			case role := <-rf.roleCh:
+				fmt.Printf("%d role is %d\n", rf.me, role)
+				if role == 1 {
+					// candidate operation
+					rf.mu.Lock()
+					currentTerm := rf.currentTerm
+					rf.votedFor = rf.me			// vote to myself
+					rf.mu.Unlock()
+					voteCountSuccess := int64(1)	// vote to myself
+					voteCountFailed := int64(0)
+					for peerIndex := range rf.peers{
+						if peerIndex == rf.me {
+							continue
+						}
+						args := &RequestVoteArgs{
+							Term: currentTerm,
+							CandidateId: rf.me,
+						}
+						reply := &RequestVoteReply{}
+						go func(pindex int){
+							if rf.sendRequestVote(pindex, args, reply){
+								if reply.VoteGranted {
+									// vote to me
+									atomic.AddInt64(&voteCountSuccess,1)
 									
-	// 							} else {
-	// 								atomic.AddInt64(&voteCountFailed,1)
-	// 							}
-	// 							if reply.Term > currentTerm{
-	// 								// double check
-	// 								rf.mu.Lock()
-	// 								if reply.Term > rf.currentTerm {
-	// 									rf.currentTerm = reply.Term
-	// 								}
-	// 								rf.mu.Unlock()
-	// 							}
-	// 						}else {
-	// 							atomic.AddInt64(&voteCountFailed,1)
-	// 						}
-	// 					}(peerIndex)
-	// 				}
-	// 				requestTimeout := time.Now().Add(1000*time.Millisecond).Unix()
-	// 				for {
-	// 					if requestTimeout <= time.Now().Unix(){
-	// 						fmt.Printf("%d requestTimeout:%v, now: %v\n",rf.me, requestTimeout, time.Now())
-	// 						break
-	// 					}
-	// 					// fmt.Printf("%d blocking\n", rf.me)
-	// 					if atomic.LoadInt64(&voteCountSuccess) >= int64(rf.count/2+1){
-	// 						rf.mu.Lock()
-	// 						if 1 == rf.role && currentTerm == rf.currentTerm{
-	// 							// become leader
-	// 							fmt.Printf("%d become leader!\n", rf.me)
-	// 							rf.role = 0
-	// 							rf.roleCh<-0
-	// 						}
-	// 						rf.mu.Unlock()
-	// 						break
-	// 					}
-	// 					if atomic.LoadInt64(&voteCountFailed) >= int64(rf.count/2+1) || atomic.LoadInt64(&voteCountSuccess) + atomic.LoadInt64(&voteCountFailed) >= int64(rf.count){
-	// 						// elect failed
-	// 						fmt.Printf("%d elect failed! retry!\n", rf.me)
-	// 						rf.roleCh<-1
-	// 						break
-	// 					}
-	// 					time.Sleep(1*time.Millisecond)
-	// 				}
-	// 				// fmt.Printf("%d time from :%dms\n",rf.me, time.Since(t1)/time.Millisecond)
-	// 				break
-	// 			}else if role == 0 {
-	// 				// leader operation
-	// 				rf.mu.Lock()
-	// 				currentTerm := rf.currentTerm
-	// 				fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
-	// 				rf.mu.Unlock()
-	// 				for peerIndex := range rf.peers {
-	// 					if peerIndex == rf.me {
-	// 						continue
-	// 					}
-	// 					go func(pindex int){
-	// 						args := &AppendEntriesArgs{
-	// 							Term: currentTerm,
-	// 							LeaderId: rf.me,
-	// 						}
-	// 						reply := &AppendEntriesReply{}
-	// 						ok := rf.sendAppendEntries(pindex, args, reply)
-	// 						fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
-	// 						if ok {
-	// 							if reply.Term > currentTerm{
-	// 								rf.mu.Lock()
-	// 								if reply.Term > rf.currentTerm {
-	// 									rf.currentTerm = reply.Term
-	// 									rf.role = 2
-	// 									fmt.Printf("leader :%d become follower!\n", rf.me)
-	// 								}
-	// 								rf.mu.Unlock()
-	// 							}
-	// 						}
-	// 					}(peerIndex)
-	// 				}
+								} else {
+									atomic.AddInt64(&voteCountFailed,1)
+								}
+								if reply.Term > currentTerm{
+									// double check
+									rf.mu.Lock()
+									if reply.Term > rf.currentTerm {
+										rf.currentTerm = reply.Term
+									}
+									rf.mu.Unlock()
+								}
+							}else {
+								atomic.AddInt64(&voteCountFailed,1)
+							}
+						}(peerIndex)
+					}
+					// time.Sleep(time.Duration(rand.Intn(1000)+1000)*time.Millisecond)
+					requestTimeout := time.Now().Add(time.Duration(rand.Intn(1000)+100)*time.Millisecond).Unix()
+					// requestTimeout := time.Now().Add(1000*time.Millisecond).Unix()
+					for {
+						if requestTimeout <= time.Now().Unix(){
+							rf.mu.Lock()
+							rf.votedFor = -1
+							rf.mu.Unlock()
+							fmt.Printf("%d requestTimeout:%v, now: %v\n",rf.me, requestTimeout, time.Now())
+							break
+						}
+						// fmt.Printf("%d blocking\n", rf.me)
+						if atomic.LoadInt64(&voteCountSuccess) >= int64(rf.count/2+1){
+							
+							rf.mu.Lock()
+							rf.votedFor = -1
+							if 1 == rf.role && currentTerm == rf.currentTerm{
+								// become leader
+								fmt.Printf("%d become leader!\n", rf.me)
+								rf.role = 0
+								rf.roleCh<-0
+							}
+							rf.mu.Unlock()
+							break
+						}
+						if atomic.LoadInt64(&voteCountFailed) >= int64(rf.count/2+1) || atomic.LoadInt64(&voteCountSuccess) + atomic.LoadInt64(&voteCountFailed) >= int64(rf.count){
+							// elect failed
+							fmt.Printf("%d elect failed! retry!\n", rf.me)
+							rf.mu.Lock()
+							rf.votedFor = -1
+							rf.roleCh<-1
+							rf.mu.Unlock()
+							break
+						}
+						time.Sleep(1*time.Millisecond)
+					}
+					// fmt.Printf("%d time from :%dms\n",rf.me, time.Since(t1)/time.Millisecond)
+					break
+				}else if role == 0 {
+					// leader operation
+					rf.mu.Lock()
+					currentTerm := rf.currentTerm
+					fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
+					rf.mu.Unlock()
+					for peerIndex := range rf.peers {
+						if peerIndex == rf.me {
+							continue
+						}
+						go func(pindex int){
+							args := &AppendEntriesArgs{
+								Term: currentTerm,
+								LeaderId: rf.me,
+							}
+							reply := &AppendEntriesReply{}
+							ok := rf.sendAppendEntries(pindex, args, reply)
+							fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
+							if ok {
+								if reply.Term > currentTerm{
+									rf.mu.Lock()
+									if reply.Term > rf.currentTerm {
+										rf.currentTerm = reply.Term
+										rf.role = 2
+										fmt.Printf("leader :%d become follower!\n", rf.me)
+									}
+									rf.mu.Unlock()
+								}
+							}
+						}(peerIndex)
+					}
 
-	// 				time.Sleep(100*time.Millisecond)
-	// 				rf.mu.Lock()
-	// 				fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
-	// 				if rf.role == 0 && currentTerm == rf.currentTerm{
-	// 					rf.roleCh<-0
-	// 				}
-	// 				rf.mu.Unlock()
-	// 			}
-	// 		}
-	// 	}
-	// }()
+					time.Sleep(100*time.Millisecond)
+					rf.mu.Lock()
+					fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
+					if rf.role == 0 && currentTerm == rf.currentTerm{
+						rf.roleCh<-0
+					}
+					rf.mu.Unlock()
+				}
+			}
+		}
+	}()
 	
 	MeanArrivalTime := 200
 	for rf.killed() == false {
@@ -621,54 +631,55 @@ func (rf *Raft) ticker() {
 			fmt.Printf("%d's random time is %v\n", rf.me, electionTimeout)
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
-				// rf.mu.Lock()
-				// fmt.Printf("%d is electionTimeout! term:%d role:%d\n", rf.me, rf.currentTerm, rf.role)
-				// if rf.role != 0 {
-				// 	rf.role = 1
-				// 	rf.currentTerm++
-				// 	rf.roleCh <- 1
-				// 	fmt.Printf("%d channel :%d\n",rf.me , len(rf.roleCh))
-				// }
-				// rf.mu.Unlock()		
-				go rf.doCandidate()
+				rf.mu.Lock()
+				fmt.Printf("%d is electionTimeout! term:%d role:%d\n", rf.me, rf.currentTerm, rf.role)
+				if rf.role != 0 {
+					rf.role = 1
+					rf.currentTerm++
+					rf.roleCh <- 1
+					fmt.Printf("%d channel :%d\n",rf.me , len(rf.roleCh))
+				}
+				rf.mu.Unlock()		
+				// go rf.doCandidate()
 				// time.Sleep(time.Duration(rand.Intn(100))*time.Millisecond)
 			case <-rf.heartbeatCh:
 				fmt.Printf("%d recv heartbeat!\n", rf.me)
 			}
-		}else {
-			// leader
-			rf.mu.Lock()
-			currentTerm := rf.currentTerm
-			fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
-			rf.mu.Unlock()
-			for peerIndex := range rf.peers {
-				if peerIndex == rf.me {
-					continue
-				}
-				go func(pindex int){
-					args := &AppendEntriesArgs{
-						Term: currentTerm,
-						LeaderId: rf.me,
-					}
-					reply := &AppendEntriesReply{}
-					ok := rf.sendAppendEntries(pindex, args, reply)
-					fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
-					if ok {
-						if reply.Term > currentTerm{
-							rf.mu.Lock()
-							if reply.Term > rf.currentTerm {
-								rf.currentTerm = reply.Term
-								rf.role = 2
-								fmt.Printf("leader :%d become follower!\n", rf.me)
-							}
-							rf.mu.Unlock()
-						}
-					}
-				}(peerIndex)
-			}
-
-			time.Sleep(100*time.Millisecond)
 		}
+		// }else {
+		// 	// leader
+		// 	rf.mu.Lock()
+		// 	currentTerm := rf.currentTerm
+		// 	fmt.Printf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
+		// 	rf.mu.Unlock()
+		// 	for peerIndex := range rf.peers {
+		// 		if peerIndex == rf.me {
+		// 			continue
+		// 		}
+		// 		go func(pindex int){
+		// 			args := &AppendEntriesArgs{
+		// 				Term: currentTerm,
+		// 				LeaderId: rf.me,
+		// 			}
+		// 			reply := &AppendEntriesReply{}
+		// 			ok := rf.sendAppendEntries(pindex, args, reply)
+		// 			fmt.Printf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
+		// 			if ok {
+		// 				if reply.Term > currentTerm{
+		// 					rf.mu.Lock()
+		// 					if reply.Term > rf.currentTerm {
+		// 						rf.currentTerm = reply.Term
+		// 						rf.role = 2
+		// 						fmt.Printf("leader :%d become follower!\n", rf.me)
+		// 					}
+		// 					rf.mu.Unlock()
+		// 				}
+		// 			}
+		// 		}(peerIndex)
+		// 	}
+
+		// 	time.Sleep(100*time.Millisecond)
+		// }
 	}
 }
 
