@@ -420,9 +420,12 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("leader1:%d\n",leader1)
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
+
+	fmt.Printf("step 2 disconect:%d, %d, %d\n",(leader1 + 2) % servers,(leader1 + 3) % servers,(leader1 + 4) % servers)
 
 	fmt.Println("step 2")
 	// submit lots of commands that won't commit
@@ -434,26 +437,31 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
-
+	fmt.Printf("step 3 disconect:%d, %d \n",(leader1 + 0) % servers,(leader1 + 1) % servers)
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-	
+	fmt.Printf("step 3 conect:%d, %d, %d\n",(leader1 + 2) % servers,(leader1 + 3) % servers,(leader1 + 4) % servers)
 	fmt.Println("step 3")
+	// fmt.Printf("")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
+		// fmt.Printf("one: %v", time.Now())
+		s := time.Now()
 		cfg.one(rand.Int(), 3, true)
+		fmt.Printf("step 3-%d:%v\n",i, time.Since(s))
 	}
-
+	// fmt.Printf("step 3:%v\n", time.Since(s))
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("step 4 leader2:%d\n",leader2)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-
+	fmt.Printf("step 4 disconect:%d\n",other)
 	fmt.Println("step 4")
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -469,13 +477,16 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
-
+	fmt.Printf("step 5 conect:%d, %d, %d\n",(leader1 + 0) % servers,(leader1 + 1) % servers,other)
 	fmt.Println("step 5")
+	s1 := time.Now()
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
+		s := time.Now()
 		cfg.one(rand.Int(), 3, true)
+		fmt.Printf("step 5-%d:%v\n",i, time.Since(s))
 	}
-
+	fmt.Printf("step 5:%v\n", time.Since(s1))
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
