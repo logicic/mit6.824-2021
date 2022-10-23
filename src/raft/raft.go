@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 	"math/rand"
-	// "fmt"
+	"fmt"
 //	"6.824/labgob"
 	"6.824/labrpc"
 	log "github.com/sirupsen/logrus"
@@ -469,10 +469,11 @@ func (rf *Raft) doCandidate(){
 		rf.votedFor = rf.me			// vote to myself
 		lastLogIndex := len(rf.logEntries)-1
 		lastLogTerm := rf.logEntries[lastLogIndex].Term
-		log.Debugf("%d term:%d, role:%d\n", rf.me, rf.currentTerm, rf.role)
+		fmt.Printf("%d term:%d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 		rf.mu.Unlock()
 		voteCountSuccess := int64(1)	// vote to myself
 		voteCountFailed := int64(0)
+		voteCh := make(chan struct{},10)
 		for peerIndex := range rf.peers{
 			if peerIndex == rf.me {
 				continue
@@ -489,9 +490,10 @@ func (rf *Raft) doCandidate(){
 					if reply.VoteGranted {
 						// vote to me
 						atomic.AddInt64(&voteCountSuccess,1)
-						
+						voteCh<-struct{}{}
 					} else {
 						atomic.AddInt64(&voteCountFailed,1)
+						voteCh<-struct{}{}
 					}
 					if reply.Term > currentTerm{
 						// double check
@@ -503,24 +505,33 @@ func (rf *Raft) doCandidate(){
 					}
 				}else {
 					atomic.AddInt64(&voteCountFailed,1)
+					voteCh<-struct{}{}
 				}
 			}(peerIndex)
 		}
-		requestTimeout := time.Now().Add(1000*time.Millisecond).Unix()
+		// requestTimeout := time.Now().Add(1000*time.Millisecond).Unix()
+		spinCount := 0
+		newTimer := time.NewTimer(1000*time.Millisecond)
+		// s := time.Now()
 		for {
-			if requestTimeout <= time.Now().Unix(){
-				rf.mu.Lock()
-				rf.votedFor = -1
-				rf.mu.Unlock()
-				log.Debugf("%d requestTimeout:%v, now: %v\n",rf.me, requestTimeout, time.Now())
-				break
+			if spinCount > -1 {
+				select {
+				case <-voteCh:
+					break
+				case <-newTimer.C:
+					rf.mu.Lock()
+					rf.votedFor = -1
+					rf.mu.Unlock()
+					// fmt.Printf("%d 123spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
+					return
+				}
 			}
 			if atomic.LoadInt64(&voteCountSuccess) >= int64(rf.count/2+1){
 				rf.mu.Lock()
 				rf.votedFor = -1
 				if 1 == rf.role && currentTerm == rf.currentTerm{
 					// become leader
-					log.Errorf("%d become leader!\n", rf.me)
+					fmt.Printf("%d become leader!At:%v\n", rf.me,time.Now())
 					rf.role = 0
 					rf.leaderCh<-struct{}{}
 					rf.mu.Unlock()
@@ -538,8 +549,10 @@ func (rf *Raft) doCandidate(){
 				rf.mu.Unlock()
 				break
 			}
-			time.Sleep(1*time.Millisecond)
+			// time.Sleep(1*time.Millisecond)
+			spinCount++
 		}
+		// fmt.Printf("%d spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
 	}else {
 		rf.mu.Unlock()
 	}
@@ -725,7 +738,7 @@ func (rf *Raft) ticker() {
 		if _, isLeader := rf.GetState(); !isLeader{
 			// electionTimeout := rand.Intn(300)+MeanArrivalTime
 			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(300)+200
-			log.Errorf("%d's random time is %v timeAt:%v\n", rf.me, electionTimeout, time.Now())
+			fmt.Printf("%d's random time is %v timeAt:%v\n", rf.me, electionTimeout, time.Now())
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):	
 				go rf.doCandidate()
