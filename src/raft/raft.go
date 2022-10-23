@@ -107,7 +107,7 @@ func (rf *Raft) GetState() (int, bool) {
 	if rf.role == 0 {
 		isleader = true
 	}
-	// fmt.Printf("%d get state: term is %d, role:%d\n", rf.me, rf.currentTerm, rf.role)
+	fmt.Printf("%d get state: term is %d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 	return term, isleader
 }
 
@@ -305,18 +305,27 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	log.Errorf("!!!!call request vote! %d vote to %d!timeAt:%v\n",rf.me , args.CandidateId, time.Now())
+	fmt.Printf("!!!!call request vote! %d vote to %d!timeAt:%v\n",rf.me , args.CandidateId, time.Now())
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.currentTerm >= args.Term {
-		log.Debugf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+	if rf.currentTerm > args.Term {
+		fmt.Printf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return 
+	}else if rf.currentTerm < args.Term{
+		rf.currentTerm = args.Term
+		if rf.role == 0 {
+			// update role 
+			fmt.Printf("RequestVote :%d become follower!\n", rf.me)
+			rf.role = 2
+			rf.followerCh<-struct{}{}
+		}
+		rf.votedFor = -1
 	}
 	if rf.votedFor > -1{
-		log.Errorf("%d has voted %d\n", rf.me, rf.votedFor)
+		fmt.Printf("%d has voted %d\n", rf.me, rf.votedFor)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return 
@@ -340,19 +349,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 
-	if rf.role == 0 {
-		// update role 
-		log.Debugf("RequestVote :%d become follower!\n", rf.me)
-		rf.role = 2
-		rf.followerCh<-struct{}{}
-	}
 	// if rf.role != 2 {
 	// 	fmt.Printf("%d's role is %d\n", rf.me, rf.role)
 	// 	reply.Term = rf.currentTerm
 	// 	reply.VoteGranted = false
 	// 	return 
 	// }
-	log.Errorf("call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
+	fmt.Printf("call request vote! %d vote to %d!\n",rf.me , args.CandidateId)
 	rf.heartbeatCh <- struct{}{}
 	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
@@ -458,6 +461,11 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) doCandidate(){
+	ta := time.Now()
+	defer func(){
+		fmt.Printf("%d doCandidate %v\n",rf.me,time.Since(ta))
+	}()
+	
 	rf.mu.Lock()
 	if rf.role != 0 {
 		// candidate operation
@@ -487,6 +495,24 @@ func (rf *Raft) doCandidate(){
 			reply := &RequestVoteReply{}
 			go func(pindex int){
 				if rf.sendRequestVote(pindex, args, reply){
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.role = 2
+						rf.votedFor=-1
+						rf.heartbeatCh<-struct{}{}
+						rf.mu.Unlock()
+						return
+					}
+						
+					if rf.role != 1 || reply.Term != rf.currentTerm {
+						// ignore outdated requestVoteReply
+						rf.mu.Unlock()
+						return
+					}else{
+						rf.mu.Unlock()
+					}
+
 					if reply.VoteGranted {
 						// vote to me
 						atomic.AddInt64(&voteCountSuccess,1)
@@ -494,14 +520,6 @@ func (rf *Raft) doCandidate(){
 					} else {
 						atomic.AddInt64(&voteCountFailed,1)
 						voteCh<-struct{}{}
-					}
-					if reply.Term > currentTerm{
-						// double check
-						rf.mu.Lock()
-						if reply.Term > rf.currentTerm {
-							rf.currentTerm = reply.Term
-						}
-						rf.mu.Unlock()
 					}
 				}else {
 					atomic.AddInt64(&voteCountFailed,1)
@@ -514,18 +532,7 @@ func (rf *Raft) doCandidate(){
 		newTimer := time.NewTimer(1000*time.Millisecond)
 		// s := time.Now()
 		for {
-			if spinCount > -1 {
-				select {
-				case <-voteCh:
-					break
-				case <-newTimer.C:
-					rf.mu.Lock()
-					rf.votedFor = -1
-					rf.mu.Unlock()
-					// fmt.Printf("%d 123spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
-					return
-				}
-			}
+
 			if atomic.LoadInt64(&voteCountSuccess) >= int64(rf.count/2+1){
 				rf.mu.Lock()
 				rf.votedFor = -1
@@ -535,6 +542,7 @@ func (rf *Raft) doCandidate(){
 					rf.role = 0
 					rf.leaderCh<-struct{}{}
 					rf.mu.Unlock()
+					rf.heartbeatCh<-struct{}{}
 					go rf.doLeader()
 				}else{
 					rf.mu.Unlock()
@@ -550,6 +558,18 @@ func (rf *Raft) doCandidate(){
 				break
 			}
 			// time.Sleep(1*time.Millisecond)
+			if spinCount > -1 {
+				select {
+				case <-voteCh:
+					break
+				case <-newTimer.C:
+					rf.mu.Lock()
+					rf.votedFor = -1
+					rf.mu.Unlock()
+					// fmt.Printf("%d 123spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
+					return
+				}
+			}
 			spinCount++
 		}
 		// fmt.Printf("%d spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
