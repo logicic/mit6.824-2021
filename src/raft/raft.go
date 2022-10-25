@@ -77,8 +77,6 @@ type Raft struct {
 	commitIndex int // index of highest log entry known to be committed(initalized to 0, increases monotonically)
 	lastApplied int // index of highest log entry applied to state machine(initalized to 0, increases monotonically)
 	heartbeatCh chan struct{}
-	leaderCh chan struct{}
-	followerCh chan struct{}
 
 	// volatile state on leaders
 	// reinitialized after election
@@ -212,11 +210,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.votedFor = -1
 	rf.currentTerm = args.Term
 	if rf.role != 2 {
-		r := rf.role
 		rf.role = 2
-		if r == 0 {
-			rf.followerCh<-struct{}{}
-		}
 		log.Debugf("AppendEntries :%d become follower!\n", rf.me)
 	}
 
@@ -320,7 +314,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// update role 
 			fmt.Printf("RequestVote :%d become follower!\n", rf.me)
 			rf.role = 2
-			rf.followerCh<-struct{}{}
 		}
 		rf.votedFor = -1
 	}
@@ -540,7 +533,6 @@ func (rf *Raft) doCandidate(){
 					// become leader
 					fmt.Printf("%d become leader!At:%v\n", rf.me,time.Now())
 					rf.role = 0
-					rf.leaderCh<-struct{}{}
 					rf.mu.Unlock()
 					rf.heartbeatCh<-struct{}{}
 					go rf.doLeader()
@@ -558,7 +550,7 @@ func (rf *Raft) doCandidate(){
 				break
 			}
 			// time.Sleep(1*time.Millisecond)
-			if spinCount > -1 {
+			if spinCount > 5 {
 				select {
 				case <-voteCh:
 					break
@@ -571,6 +563,7 @@ func (rf *Raft) doCandidate(){
 				}
 			}
 			spinCount++
+			time.Sleep(10*time.Millisecond)
 		}
 		// fmt.Printf("%d spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
 	}else {
@@ -579,13 +572,6 @@ func (rf *Raft) doCandidate(){
 }
 
 func (rf *Raft) doLeader(){
-	// leader
-	// rf.mu.Lock()
-
-
-	// // log.Infof("%d rf.logEntries:%v",rf.me ,rf.logEntries)
-	// log.Debugf("%d current term :%d current role :%d\n", rf.me, rf.currentTerm, rf.role)
-	// rf.mu.Unlock()
 	for peerIndex := range rf.peers {
 		if peerIndex == rf.me {
 			continue
@@ -610,8 +596,6 @@ func (rf *Raft) doLeader(){
 					LogEntries:logs,
 					LeaderCommit: commitIndex,
 				}
-				// log.Warnf("%d send heartbeat!!!!nextIndex[%d]:%d log:%v", rf.me,pindex,nextIndex, args)
-				// commands = rf.logEntries[rf.nextIndex[pindex]:]
 			}else {
 				rf.mu.Unlock()
 				args = AppendEntriesArgs{
@@ -634,7 +618,6 @@ func (rf *Raft) doLeader(){
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.role = 2
-						rf.followerCh<-struct{}{}
 						log.Debugf("leader :%d become follower!\n", rf.me)
 					}
 					rf.mu.Unlock()
@@ -724,28 +707,6 @@ func (rf *Raft) syncLogEntries(applyCh chan ApplyMsg) {
 	}
 }
 
-func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
-	for rf.killed() == false {
-		time.Sleep(1*time.Millisecond)
-		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied{
-			log.Errorf("%d:%v",rf.me,time.Now())
-			rf.lastApplied++
-			log.Infof("%d applyid: %d logentry:%d", rf.me,rf.lastApplied,rf.logEntries)
-			c := ApplyMsg{
-				CommandValid : true,
-				Command : rf.logEntries[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
-			}
-			rf.mu.Unlock()
-			log.Warnf("%d rf.lastApplied:%d ApplyMsg:%v",rf.me ,rf.lastApplied, c)
-			applyCh<-c
-		}else{
-			rf.mu.Unlock()
-		}
-	}
-}
-
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -761,14 +722,13 @@ func (rf *Raft) ticker() {
 			fmt.Printf("%d's random time is %v timeAt:%v\n", rf.me, electionTimeout, time.Now())
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):	
-				go rf.doCandidate()
+				rf.doCandidate()
 			case <-rf.heartbeatCh:
 				log.Debugf("%d recv heartbeat!\n", rf.me)
 			}
 		}else{
-			// time.Sleep(500*time.Millisecond)
-			// followerCh block leader role
-			<-rf.followerCh
+			rf.doLeader()
+			time.Sleep(100*time.Millisecond)
 		}
 	}
 }
@@ -794,8 +754,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.heartbeatCh = make(chan struct{},100)
-	rf.leaderCh = make(chan struct{},100)
-	rf.followerCh = make(chan struct{},100)
 	rf.applyCh = applyCh
 	rf.votedFor = -1
 	rf.role = 2 // follower
@@ -815,27 +773,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.syncLogEntries(applyCh)
-	// go rf.applyLog(applyCh)
-	go func(){
-		for rf.killed() == false {
-			if _, isLeader := rf.GetState(); isLeader{
-				rf.doLeader()
-				time.Sleep(100*time.Millisecond)
-			}else {
-				// time.Sleep(500*time.Millisecond)
-				// leaderCh block follower role
-				<-rf.leaderCh
-			}
-		}
-	}()
-	// go func(){
-	// 	for rf.killed() == false {
-	// 		select{
-	// 			case c:=<-rf.applyCh:
-	// 				applyCh<-c
-	// 		}
-	// 	}
-	// }()
+	// go rf.syncLogEntries(applyCh)
+	
 	return rf
 }
