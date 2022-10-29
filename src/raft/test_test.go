@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -61,33 +63,26 @@ func TestReElection2A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
-	// fmt.Printf("%d disconnect!\n", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
-	// fmt.Printf("%d connect!\n", leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
-	to := (leader2 + 1) % servers
-	cfg.disconnect(to)
-	// fmt.Printf("%d disconnect!\n", leader2)
-	// fmt.Printf("%d disconnect!\n", to)
+	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	// fmt.Printf("%d connect!\n", to)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
-	// fmt.Printf("%d connect!\n", leader2)
 	cfg.checkOneLeader()
 
 	cfg.end()
@@ -105,18 +100,17 @@ func TestManyElections2A(t *testing.T) {
 	iters := 10
 	for ii := 1; ii < iters; ii++ {
 		// disconnect three nodes
-		// fmt.Printf("%d number\n", ii)
 		i1 := rand.Int() % servers
 		i2 := rand.Int() % servers
 		i3 := rand.Int() % servers
 		cfg.disconnect(i1)
 		cfg.disconnect(i2)
 		cfg.disconnect(i3)
-		fmt.Printf("disconect:%d %d %d\n", i1,i2,i3)
+
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
 		cfg.checkOneLeader()
-		fmt.Printf("conect:%d %d %d\n", i1,i2,i3)
+
 		cfg.connect(i1)
 		cfg.connect(i2)
 		cfg.connect(i3)
@@ -415,19 +409,15 @@ func TestBackup2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
-	// fmt.Println("step 1")
+
 	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
-	// fmt.Printf("leader1:%d\n",leader1)
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
-	// fmt.Printf("step 2 disconect:%d, %d, %d\n",(leader1 + 2) % servers,(leader1 + 3) % servers,(leader1 + 4) % servers)
-
-	// fmt.Println("step 2")
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
@@ -437,32 +427,25 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
-	// fmt.Printf("step 3 disconect:%d, %d \n",(leader1 + 0) % servers,(leader1 + 1) % servers)
+
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-	// fmt.Printf("step 3 conect:%d, %d, %d\n",(leader1 + 2) % servers,(leader1 + 3) % servers,(leader1 + 4) % servers)
-	// fmt.Println("step 3")
-	// fmt.Printf("")
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		// fmt.Printf("one: %v", time.Now())
-		// s := time.Now()
 		cfg.one(rand.Int(), 3, true)
-		// fmt.Printf("step 3-%d:%v\n",i, time.Since(s))
 	}
-	// fmt.Printf("step 3:%v\n", time.Since(s))
+
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
-	// fmt.Printf("step 4 leader2:%d\n",leader2)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-	// fmt.Printf("step 4 disconect:%d\n",other)
-	// fmt.Println("step 4")
+
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
@@ -477,21 +460,16 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
-	// fmt.Printf("step 5 conect:%d, %d, %d\n",(leader1 + 0) % servers,(leader1 + 1) % servers,other)
-	// fmt.Println("step 5")
-	// s1 := time.Now()
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		// s := time.Now()
 		cfg.one(rand.Int(), 3, true)
-		// fmt.Printf("step 5-%d:%v\n",i, time.Since(s))
 	}
-	// fmt.Printf("step 5:%v\n", time.Since(s1))
+
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
-	// fmt.Println("step 6")
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()

@@ -8,19 +8,23 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"testing"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -433,9 +437,7 @@ func (cfg *config) checkNoLeader() {
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
-	// s := time.Now()
 	for i := 0; i < len(cfg.rafts); i++ {
-		
 		if cfg.applyErr[i] != "" {
 			cfg.t.Fatal(cfg.applyErr[i])
 		}
@@ -452,9 +454,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			count += 1
 			cmd = cmd1
 		}
-		
 	}
-	// fmt.Printf("%d count:%d since:%v\n", 0, count, time.Since(s))
 	return count, cmd
 }
 
@@ -507,7 +507,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
 		index := -1
-		// s1 := time.Now()
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
@@ -524,35 +523,27 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-		// fmt.Printf("zibi3:%v\n",time.Since(s1))
-		// s := time.Now()
-		count := 0
+
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				
 				nd, cmd1 := cfg.nCommitted(index)
-				
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
-						// fmt.Printf("zibi2 %d:%v\n",count,time.Since(s))
 						// and it was the command we submitted.
 						return index
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
-				// fmt.Printf("count%d:%v",count,time.Now())
-				count++
 			}
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
-			// fmt.Printf("zibi1:%v\n",time.Since(s))
 		}
 	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
