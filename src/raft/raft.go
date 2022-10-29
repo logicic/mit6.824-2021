@@ -239,13 +239,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(rf.logEntries)-1 == args.PrevLogIndex {
 		rf.logEntries = append(rf.logEntries, args.LogEntries...)
 	} else {
-		// len(rf.logEntries)-1 > args.PrevLogIndex
-		log.Warnf("%d cao!!! logs:%v", rf.me, rf.logEntries)
 		for i := 0; i <= len(args.LogEntries)-1; i++ {
 			if i+args.PrevLogIndex+1 <= len(rf.logEntries)-1 {
 				if rf.logEntries[args.PrevLogIndex+1+i].Term != args.LogEntries[i].Term {
 					rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+i+1], args.LogEntries[i:]...)
-					log.Errorf("###############%d logs:%v\n", rf.me, rf.logEntries)
 					break
 				}
 			} else {
@@ -316,7 +313,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 	rf.role = FOLLOWER
 		// }
 	}
-	if rf.votedFor > -1 {
+	if rf.votedFor != NONE {
 		log.Errorf("%d has voted %d\n", rf.me, rf.votedFor)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -460,11 +457,8 @@ func (rf *Raft) doCandidate() {
 	rf.mu.Lock()
 	if rf.role != LEADER {
 		// candidate operation
-		// if rf.role == FOLLOWER {
-		// 	rf.role = CANDIDATE
-		// }
 		rf.updateRoleWithoutLock(CANDIDATE)
-		rf.currentTerm++
+		rf.updateTermWithoutLock(rf.currentTerm + 1)
 		rf.votedFor = rf.me // vote to myself
 		lastLogIndex := len(rf.logEntries) - 1
 		lastLogTerm := rf.logEntries[lastLogIndex].Term
@@ -544,24 +538,16 @@ func (rf *Raft) doLeader() {
 			}
 
 			reply := &AppendEntriesReply{}
-			s := time.Now()
-			ok := rf.sendAppendEntries(pindex, &args, reply)
-			elapsed := time.Since(s)
-			log.Errorf("%d sendAppendEntries to %d is %v nextIndex:%d lastLogIndex:%d spend %v", rf.me, pindex, ok, nextIndex, lastLogIndex, elapsed)
-			log.Debugf("%d sendAppendEntries to %d is %v\n", rf.me, pindex, ok)
-			if ok {
+			if rf.sendAppendEntries(pindex, &args, reply) {
 				log.Infof("%d lastLogIndex:%d nextIndex:%d", rf.me, lastLogIndex, nextIndex)
-				if reply.Term > currentTerm {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.updateRoleWithoutLock(FOLLOWER)
-						log.Debugf("leader :%d become follower!\n", rf.me)
-					}
-					rf.mu.Unlock()
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.updateRoleWithoutLock(FOLLOWER)
+					log.Debugf("leader :%d become follower!\n", rf.me)
 				} else if lastLogIndex >= nextIndex {
 					// append
-					rf.mu.Lock()
 					if reply.Success {
 						rf.nextIndex[pindex] = lastLogIndex + 1
 						rf.matchIndex[pindex] = lastLogIndex
@@ -569,9 +555,10 @@ func (rf *Raft) doLeader() {
 						log.Errorf("%d matchIndex[%d]: %d", rf.me, pindex, rf.matchIndex[pindex])
 					} else {
 						// retry
-						rf.nextIndex[pindex]--
+						if rf.nextIndex[pindex] > 0 {
+							rf.nextIndex[pindex]--
+						}
 					}
-					rf.mu.Unlock()
 				}
 			}
 		}(peerIndex)
