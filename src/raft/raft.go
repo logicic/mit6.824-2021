@@ -85,6 +85,13 @@ type Raft struct {
 	applyCh    chan ApplyMsg
 }
 
+const (
+	NONE      = -1
+	LEADER    = 0
+	CANDIDATE = 1
+	FOLLOWER  = 2
+)
+
 // each entry contains command for state machine, and term when entry was received by leader
 type LogEntry struct {
 	Command interface{}
@@ -100,11 +107,8 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	isleader = false
+	isleader = rf.role == LEADER
 	term = rf.currentTerm
-	if rf.role == 0 {
-		isleader = true
-	}
 	log.Errorf("%d get state: term is %d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 	return term, isleader
 }
@@ -191,6 +195,17 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (rf *Raft) updateTermWithoutLock(term int) {
+	rf.votedFor = NONE
+	rf.currentTerm = term
+}
+
+func (rf *Raft) updateRoleWithoutLock(role int) {
+	if rf.role != role {
+		rf.role = role
+	}
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -204,13 +219,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+
+	// refresh electionTimer
 	rf.heartbeatCh <- struct{}{}
-	rf.votedFor = -1
-	rf.currentTerm = args.Term
-	if rf.role != 2 {
-		rf.role = 2
-		log.Errorf("AppendEntries :%d become follower!\n", rf.me)
-	}
+	rf.updateTermWithoutLock(args.Term)
+	rf.updateRoleWithoutLock(FOLLOWER)
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
@@ -295,13 +308,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	} else if rf.currentTerm < args.Term {
-		rf.currentTerm = args.Term
-		if rf.role == 0 {
-			// update role
-			log.Errorf("RequestVote :%d become follower!\n", rf.me)
-			rf.role = 2
-		}
-		rf.votedFor = -1
+		rf.updateTermWithoutLock(args.Term)
+		rf.updateRoleWithoutLock(FOLLOWER)
+		// if rf.role == LEADER {
+		// 	// update role
+		// 	log.Errorf("RequestVote :%d become follower!\n", rf.me)
+		// 	rf.role = FOLLOWER
+		// }
 	}
 	if rf.votedFor > -1 {
 		log.Errorf("%d has voted %d\n", rf.me, rf.votedFor)
@@ -390,7 +403,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 
 	rf.mu.Lock()
-	if rf.role != 0 {
+	if rf.role != LEADER {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
@@ -444,17 +457,13 @@ func (rf *Raft) reInitializedLeaderStateWithoutLock() {
 }
 
 func (rf *Raft) doCandidate() {
-	ta := time.Now()
-	defer func() {
-		log.Errorf("%d doCandidate %v\n", rf.me, time.Since(ta))
-	}()
-
 	rf.mu.Lock()
-	if rf.role != 0 {
+	if rf.role != LEADER {
 		// candidate operation
-		if rf.role == 2 {
-			rf.role = 1
-		}
+		// if rf.role == FOLLOWER {
+		// 	rf.role = CANDIDATE
+		// }
+		rf.updateRoleWithoutLock(CANDIDATE)
 		rf.currentTerm++
 		rf.votedFor = rf.me // vote to myself
 		lastLogIndex := len(rf.logEntries) - 1
@@ -473,15 +482,14 @@ func (rf *Raft) doCandidate() {
 				if rf.sendRequestVote(pindex, args, reply) {
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.role = 2
-						rf.votedFor = -1
+						rf.updateTermWithoutLock(reply.Term)
+						rf.updateRoleWithoutLock(FOLLOWER)
 						rf.heartbeatCh <- struct{}{}
 						rf.mu.Unlock()
 						return
 					}
 
-					if rf.role != 1 || reply.Term != rf.currentTerm {
+					if rf.role != CANDIDATE || reply.Term != rf.currentTerm {
 						// ignore outdated requestVoteReply
 						rf.mu.Unlock()
 						return
@@ -493,8 +501,8 @@ func (rf *Raft) doCandidate() {
 
 					if gotVoted > len(rf.peers)/2 {
 						log.Errorf("%d become leader!At:%v\n", rf.me, time.Now())
-						rf.role = 0
-						rf.votedFor = -1
+						rf.updateRoleWithoutLock(LEADER)
+						rf.votedFor = NONE
 						// rf.reInitializedLeaderStateWithoutLock()
 						rf.mu.Unlock()
 						rf.heartbeatCh <- struct{}{}
@@ -547,7 +555,7 @@ func (rf *Raft) doLeader() {
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
-						rf.role = 2
+						rf.updateRoleWithoutLock(FOLLOWER)
 						log.Debugf("leader :%d become follower!\n", rf.me)
 					}
 					rf.mu.Unlock()
@@ -682,8 +690,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.heartbeatCh = make(chan struct{}, 100)
 	rf.applyCh = applyCh
-	rf.votedFor = -1
-	rf.role = 2 // follower
+	rf.votedFor = NONE
+	rf.role = FOLLOWER // follower
 	rf.count = len(peers)
 	rf.nextIndex = make([]int, rf.count)
 	rf.logEntries = make([]LogEntry, 1) //logEntries first index is 1
