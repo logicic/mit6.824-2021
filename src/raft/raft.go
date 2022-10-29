@@ -212,10 +212,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Errorf("AppendEntries :%d become follower!\n", rf.me)
 	}
 
-	// if args.LeaderCommit > rf.commitIndex{
-	// 	rf.commitIndex = args.LeaderCommit
-	// }
-
 	reply.Success = true
 	reply.Term = rf.currentTerm
 
@@ -330,18 +326,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	// if rf.role != 2 {
-	// 	log.Errorf("%d's role is %d\n", rf.me, rf.role)
-	// 	reply.Term = rf.currentTerm
-	// 	reply.VoteGranted = false
-	// 	return
-	// }
 	log.Errorf("call request vote! %d vote to %d!\n", rf.me, args.CandidateId)
 	rf.heartbeatCh <- struct{}{}
 	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
-
 	return
 }
 
@@ -414,7 +403,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.logEntries) - 1
 	term = rf.logEntries[index].Term
 	rf.matchIndex[rf.me] = index
-	// log.Infof("%d log entry: %v\n", rf.me, rf.logEntries)
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -517,7 +505,6 @@ func (rf *Raft) doCandidate() {
 				}
 			}(peerIndex)
 		}
-		// log.Errorf("%d spinCount:%d spend: %v\n",rf.me,spinCount, time.Since(s))
 	} else {
 		rf.mu.Unlock()
 	}
@@ -536,7 +523,6 @@ func (rf *Raft) doLeader() {
 			lastLogIndex := len(rf.logEntries) - 1
 			nextIndex := rf.nextIndex[pindex]
 			commitIndex := rf.commitIndex
-			// if lastLogIndex >= nextIndex {
 			logs := rf.logEntries[nextIndex:]
 			term := rf.logEntries[nextIndex-1].Term
 			rf.mu.Unlock()
@@ -548,14 +534,6 @@ func (rf *Raft) doLeader() {
 				LogEntries:   logs,
 				LeaderCommit: commitIndex,
 			}
-			// } else {
-			// 	rf.mu.Unlock()
-			// 	args = AppendEntriesArgs{
-			// 		Term:         currentTerm,
-			// 		LeaderId:     rf.me,
-			// 		LeaderCommit: commitIndex,
-			// 	}
-			// }
 
 			reply := &AppendEntriesReply{}
 			s := time.Now()
@@ -577,14 +555,9 @@ func (rf *Raft) doLeader() {
 					// append
 					rf.mu.Lock()
 					if reply.Success {
-
 						rf.nextIndex[pindex] = lastLogIndex + 1
 						rf.matchIndex[pindex] = lastLogIndex
-						// rf.nextIndex[rf.me] = lastLogIndex+1
-						// rf.matchIndex[rf.me] = lastLogIndex
-						log.Errorf("$$$$$$$$$$$%d\n", rf.me)
 						rf.checkLogEntries()
-
 						log.Errorf("%d matchIndex[%d]: %d", rf.me, pindex, rf.matchIndex[pindex])
 					} else {
 						// retry
@@ -610,9 +583,7 @@ func (rf *Raft) checkLogEntries() {
 			log.Errorf("%d rf.commitIndex:%d\n", rf.me, rf.commitIndex)
 		}
 	}
-	// if rf.role == 0 {
-	// 	go rf.doLeader()
-	// }
+
 	for rf.commitIndex > rf.lastApplied {
 		log.Errorf("%d:%v", rf.me, time.Now())
 		rf.lastApplied++
@@ -672,7 +643,7 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		if _, isLeader := rf.GetState(); !isLeader {
 			// electionTimeout := rand.Intn(300)+MeanArrivalTime
-			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(300) + 200
+			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(500) + 600
 			log.Errorf("%d's random time is %v timeAt:%v\n", rf.me, electionTimeout, time.Now())
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
