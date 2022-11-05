@@ -216,8 +216,9 @@ type AppendEntriesArgs struct {
 //
 type AppendEntriesReply struct {
 	// Your data here (2A).
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	RealNextIndex int
 }
 
 func (rf *Raft) updateTermWithoutLock(term int) {
@@ -250,6 +251,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
 
+	if args.PrevLogIndex < 0 {
+		reply.Success = false
+		reply.RealNextIndex = NONE
+		return
+	}
+
 	reply.Success = true
 	reply.Term = rf.currentTerm
 
@@ -258,22 +265,59 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.logEntries)-1 || rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm {
 		fmt.Printf("%d append leader %d prevLogIndex:%d prevLogTerm:%d\n", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.Success = false
+		if args.PrevLogIndex > len(rf.logEntries)-1 {
+			reply.RealNextIndex = len(rf.logEntries) - 1
+		} else {
+			conflictTerm := rf.logEntries[args.PrevLogIndex].Term
+			reply.RealNextIndex = 1
+			for i := args.PrevLogIndex - 1; i > 0; i-- {
+				if rf.logEntries[i].Term != conflictTerm {
+					reply.RealNextIndex = i + 1
+					break
+				}
+			}
+		}
+		if reply.RealNextIndex == 0 {
+			reply.RealNextIndex = 1
+		}
 		return
 	}
 
+	// if len(args.LogEntries) > 0 {
+	// 	for i, v := range args.LogEntries {
+	// 		index := args.PrevLogIndex + 1 + i
+	// 		if len(rf.logEntries)-1 >= index && rf.logEntries[index].Term != v.Term {
+	// 			// overwrite existed log
+	// 			rf.logEntries = rf.logEntries[:index]
+	// 			rf.persist()
+	// 		}
+	// 		if len(rf.logEntries)-1 < index {
+	// 			// append new log
+	// 			rf.logEntries = append(rf.logEntries, args.LogEntries[i:]...)
+	// 			rf.persist()
+	// 			break
+	// 		}
+	// 	}
+	// }
 	if len(args.LogEntries) > 0 {
-		for i, v := range args.LogEntries {
-			index := args.PrevLogIndex + 1 + i
-			if len(rf.logEntries)-1 >= index {
-				// overwrite existed log
-				rf.logEntries[index] = v
-			} else {
-				// append new log
-				rf.logEntries = append(rf.logEntries, v)
-			}
-		}
+		rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.LogEntries...)
 		rf.persist()
 	}
+
+	// if len(args.LogEntries) > 0 {
+	// 	for i, v := range args.LogEntries {
+	// 		index := args.PrevLogIndex + 1 + i
+	// 		if len(rf.logEntries)-1 >= index {
+	// 			// overwrite existed log
+	// 			rf.logEntries[index] = v
+	// 		} else {
+	// 			// append new log
+	// 			rf.logEntries = append(rf.logEntries, v)
+	// 		}
+	// 	}
+	// 	rf.persist()
+	// }
+
 	// if len(rf.logEntries)-1 == args.PrevLogIndex {
 	// 	rf.logEntries = append(rf.logEntries, args.LogEntries...)
 	// } else {
@@ -364,15 +408,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if currentLastLogEntries != 0 {
 		if currentLastEntryTerm < args.LastLogTerm ||
 			(currentLastEntryTerm == args.LastLogTerm && currentLastLogEntries <= args.LastLogIndex) {
-
+			fmt.Printf("diao %d vote to %d but currentLastLogEntries:%d, currentLastEntryTerm:%d, args.LastLogTerm:%d, args.LastLogIndex:%d\n", rf.me, args.CandidateId,
+				currentLastLogEntries, currentLastEntryTerm, args.LastLogTerm, args.LastLogIndex)
 		} else {
 			// log.Infof("%d is new up-to-date thant %d\n", rf.me, args.CandidateId)
-			log.Errorf("%d vote to %d but currentLastLogEntries:%d, currentLastEntryTerm:%d, args.LastLogTerm:%d, args.LastLogIndex:%d", rf.me, args.CandidateId,
+			fmt.Printf("%d vote to %d but currentLastLogEntries:%d, currentLastEntryTerm:%d, args.LastLogTerm:%d, args.LastLogIndex:%d\n", rf.me, args.CandidateId,
 				currentLastLogEntries, currentLastEntryTerm, args.LastLogTerm, args.LastLogIndex)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
 		}
+	} else {
+		fmt.Printf("%d diao!\n", rf.me)
 	}
 
 	fmt.Printf("call request vote! %d vote to %d!\n", rf.me, args.CandidateId)
@@ -449,11 +496,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.logEntries = append(rf.logEntries, logItem)
 	rf.persist()
-	log.Errorf("%d append logs in start %v\n", rf.me, rf.logEntries)
 	index = len(rf.logEntries) - 1
 	term = rf.logEntries[index].Term
 	rf.matchIndex[rf.me] = index
+	fmt.Printf("%d temr[%d] append logs in start log[%d]:%v\n", rf.me, rf.currentTerm, index, rf.logEntries[index])
 	// rf.persist()
+	// go rf.doLeader()
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -535,7 +583,7 @@ func (rf *Raft) doCandidate() {
 					}
 
 					if gotVoted > len(rf.peers)/2 {
-						fmt.Printf("%d become leader!At:%v\n", rf.me, time.Now())
+						fmt.Printf("%d become leader!At:%d\n", rf.me, rf.currentTerm)
 						rf.updateRoleWithoutLock(LEADER)
 						rf.votedFor = NONE
 						rf.reInitializedLeaderStateWithoutLock()
@@ -609,22 +657,24 @@ func (rf *Raft) doLeader() {
 					return
 				}
 				if rf.role == LEADER && reply.Term == rf.currentTerm {
-					if lastLogIndex >= nextIndex {
-						// append
-						if reply.Success {
-							rf.nextIndex[pindex] = nextIndex + len(logs)
-							rf.matchIndex[pindex] = nextIndex + len(logs) - 1
-							fmt.Printf("%d append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
-							rf.checkLogEntries()
-							log.Errorf("%d matchIndex[%d]: %d", rf.me, pindex, rf.matchIndex[pindex])
-						} else {
-							// retry
-							if rf.nextIndex[pindex] > 0 {
-								rf.nextIndex[pindex]--
-							}
-						}
+
+					// append
+					if reply.RealNextIndex == NONE {
+						// out-dated reply
+						return
+					}
+					if reply.Success {
+						rf.nextIndex[pindex] = nextIndex + len(logs)
+						rf.matchIndex[pindex] = nextIndex + len(logs) - 1
+						fmt.Printf("%d append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
+						rf.checkLogEntries()
+					} else {
+						// retry
+						rf.nextIndex[pindex] = reply.RealNextIndex
+						fmt.Printf("%d not append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
 
 					}
+
 				}
 			}
 		}(peerIndex)
@@ -632,7 +682,11 @@ func (rf *Raft) doLeader() {
 }
 
 func (rf *Raft) checkLogEntries() {
-	for i := rf.commitIndex + 1; i <= len(rf.logEntries)-1; i++ {
+
+	for i := rf.commitIndex + 1; i <= len(rf.logEntries)-1 && rf.role == LEADER; i++ {
+		if rf.logEntries[i].Term != rf.currentTerm {
+			continue
+		}
 		majority := 0
 		for pindex := range rf.peers {
 			if rf.matchIndex[pindex] >= i {
@@ -646,10 +700,10 @@ func (rf *Raft) checkLogEntries() {
 	}
 
 	// flag := false
-	for rf.commitIndex > rf.lastApplied {
+	for rf.commitIndex > rf.lastApplied && len(rf.logEntries)-1 > rf.lastApplied {
 		log.Errorf("%d:%v", rf.me, time.Now())
 		rf.lastApplied++
-		fmt.Printf("%d applyid: %d logentry:%d\n", rf.me, rf.lastApplied, rf.logEntries)
+		fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, len(rf.logEntries)-1, rf.lastApplied, rf.logEntries[rf.lastApplied])
 		c := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logEntries[rf.lastApplied].Command,
@@ -755,20 +809,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.count = len(peers)
 	rf.nextIndex = make([]int, rf.count)
 	rf.logEntries = make([]LogEntry, 1) //logEntries first index is 1
-	rf.readPersist(rf.persister.raftstate)
-	lastLogIndex := len(rf.logEntries) - 1
-	for i := range rf.nextIndex {
-		// (initialized to leader last log index + 1
-		rf.nextIndex[i] = lastLogIndex + 1
-		// rf.nextIndex[i] = 1
-	}
-	fmt.Printf("%d is %v\n", rf.me, rf.nextIndex)
+	// rf.readPersist(rf.persister.raftstate)
+	// lastLogIndex := len(rf.logEntries) - 1
+	// for i := range rf.nextIndex {
+	// 	// (initialized to leader last log index + 1
+	// 	rf.nextIndex[i] = lastLogIndex + 1
+	// 	// rf.nextIndex[i] = 1
+	// }
+	// fmt.Printf("%d is %v\n", rf.me, rf.nextIndex)
 	rf.matchIndex = make([]int, rf.count)
 	rf.lastApplied = 0
 	rf.commitIndex = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	fmt.Printf("%d begin raft term:%d log:%v\n", rf.me, rf.currentTerm, rf.logEntries)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	// go rf.syncLogEntries(applyCh)
