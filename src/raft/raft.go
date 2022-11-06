@@ -195,7 +195,24 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	fmt.Printf("%d snapshot[%d] !!!!!\n", rf.me, index)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// update logEntries, cut off it
+	term := rf.logEntries.at(index).Term
+	rf.logEntries.slice(index + 1)
+	rf.logEntries.setIndex0(index+1, term)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logEntries)
+	data := w.Bytes()
+	if snapshot != nil || len(snapshot) > 0 {
+		rf.persister.SaveStateAndSnapshot(data, snapshot)
+	} else {
+		rf.persister.SaveRaftState(data)
+	}
 }
 
 //
@@ -312,7 +329,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = rf.logEntries.len() - 1
 		}
 	}
+	rf.mu.Unlock()
 	rf.checkLogEntries()
+	rf.mu.Lock()
 	// rf.persist()
 	return
 }
@@ -589,7 +608,7 @@ func (rf *Raft) doLeader() {
 			lastLogIndex := rf.logEntries.len() - 1
 			nextIndex := rf.nextIndex[pindex]
 			commitIndex := rf.commitIndex
-			term := 0
+			term := rf.logEntries.Term0
 			if nextIndex-1 >= 0 {
 				term = rf.logEntries.at(nextIndex - 1).Term
 			}
@@ -638,7 +657,9 @@ func (rf *Raft) doLeader() {
 						rf.nextIndex[pindex] = nextIndex + len(logs)
 						rf.matchIndex[pindex] = nextIndex + len(logs) - 1
 						fmt.Printf("%d append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
+						rf.mu.Unlock()
 						rf.checkLogEntries()
+						rf.mu.Lock()
 					} else {
 						// retry
 						rf.nextIndex[pindex] = reply.RealNextIndex
@@ -653,7 +674,8 @@ func (rf *Raft) doLeader() {
 }
 
 func (rf *Raft) checkLogEntries() {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	for i := rf.commitIndex + 1; i <= rf.logEntries.len()-1 && rf.role == LEADER; i++ {
 		if rf.logEntries.at(i).Term != rf.currentTerm {
 			continue
@@ -680,7 +702,9 @@ func (rf *Raft) checkLogEntries() {
 			Command:      rf.logEntries.at(rf.lastApplied).Command,
 			CommandIndex: rf.lastApplied,
 		}
+		rf.mu.Unlock()
 		rf.applyCh <- c
+		rf.mu.Lock()
 	}
 }
 
