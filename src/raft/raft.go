@@ -283,26 +283,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// if len(args.LogEntries) > 0 {
-	// 	for i, v := range args.LogEntries {
-	// 		index := args.PrevLogIndex + 1 + i
-	// 		if len(rf.logEntries)-1 >= index && rf.logEntries[index].Term != v.Term {
-	// 			// overwrite existed log
-	// 			rf.logEntries = rf.logEntries[:index]
-	// 			rf.persist()
-	// 		}
-	// 		if len(rf.logEntries)-1 < index {
-	// 			// append new log
-	// 			rf.logEntries = append(rf.logEntries, args.LogEntries[i:]...)
-	// 			rf.persist()
-	// 			break
-	// 		}
-	// 	}
-	// }
 	if len(args.LogEntries) > 0 {
-		rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.LogEntries...)
-		rf.persist()
+		for i, v := range args.LogEntries {
+			index := args.PrevLogIndex + 1 + i
+			if len(rf.logEntries)-1 >= index && rf.logEntries[index].Term != v.Term {
+				// overwrite existed log
+				rf.logEntries = rf.logEntries[:index]
+				rf.persist()
+			}
+			if len(rf.logEntries)-1 < index {
+				// append new log
+				rf.logEntries = append(rf.logEntries, args.LogEntries[i:]...)
+				rf.persist()
+				break
+			}
+		}
+		fmt.Printf("%d term:%d logs:%v\n", rf.me, rf.currentTerm, rf.logEntries)
 	}
+	// if len(args.LogEntries) > 0 {
+	// 	rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.LogEntries...)
+	// 	rf.persist()
+	// }
 
 	// if len(args.LogEntries) > 0 {
 	// 	for i, v := range args.LogEntries {
@@ -381,7 +382,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	fmt.Printf("!!!!call request vote! %d vote to %d!rf.term:%d args.term:%d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
-	if rf.currentTerm > args.Term {
+	if rf.currentTerm >= args.Term {
 		log.Errorf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
