@@ -85,6 +85,8 @@ type Raft struct {
 	nextIndex  []int // for each server, index of next log entry to send to that server(initialized to leader last log index+1)
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server(initialized to leader last log index+1)
 	applyCh    chan ApplyMsg
+
+	applyCond *sync.Cond
 }
 
 const (
@@ -329,9 +331,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = rf.logEntries.len() - 1
 		}
 	}
-	rf.mu.Unlock()
-	rf.checkLogEntries()
-	rf.mu.Lock()
+
+	// rf.checkLogEntries()
+	rf.applyCond.Signal()
 	// rf.persist()
 	return
 }
@@ -608,20 +610,27 @@ func (rf *Raft) doLeader() {
 			lastLogIndex := rf.logEntries.len() - 1
 			nextIndex := rf.nextIndex[pindex]
 			commitIndex := rf.commitIndex
-			term := rf.logEntries.Term0
+			preterm := rf.logEntries.Term0
 			if nextIndex-1 >= 0 {
-				term = rf.logEntries.at(nextIndex - 1).Term
+				preterm = rf.logEntries.at(nextIndex - 1).Term
 			}
 			var logs []Entry
 			if lastLogIndex >= nextIndex {
 				// logs = rf.logEntries[nextIndex:]
 				logs = make([]Entry, lastLogIndex-nextIndex+1)
-				copy(logs, rf.logEntries.move(nextIndex, lastLogIndex+1))
+				if temp := rf.logEntries.move(nextIndex, lastLogIndex+1); temp != nil {
+					copy(logs, temp)
+				} else {
+					fmt.Printf("send Installsnapshot rpc!\n")
+					rf.mu.Unlock()
+					return
+				}
+
 				args = AppendEntriesArgs{
 					Term:         currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: nextIndex - 1,
-					PrevLogTerm:  term,
+					PrevLogTerm:  preterm,
 					LogEntries:   logs,
 					LeaderCommit: commitIndex,
 				}
@@ -631,7 +640,7 @@ func (rf *Raft) doLeader() {
 					LeaderId:     rf.me,
 					LeaderCommit: commitIndex,
 					PrevLogIndex: nextIndex - 1,
-					PrevLogTerm:  term,
+					PrevLogTerm:  preterm,
 				}
 			}
 			rf.mu.Unlock()
@@ -657,9 +666,9 @@ func (rf *Raft) doLeader() {
 						rf.nextIndex[pindex] = nextIndex + len(logs)
 						rf.matchIndex[pindex] = nextIndex + len(logs) - 1
 						fmt.Printf("%d append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
-						rf.mu.Unlock()
+
 						rf.checkLogEntries()
-						rf.mu.Lock()
+
 					} else {
 						// retry
 						rf.nextIndex[pindex] = reply.RealNextIndex
@@ -674,8 +683,6 @@ func (rf *Raft) doLeader() {
 }
 
 func (rf *Raft) checkLogEntries() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	for i := rf.commitIndex + 1; i <= rf.logEntries.len()-1 && rf.role == LEADER; i++ {
 		if rf.logEntries.at(i).Term != rf.currentTerm {
 			continue
@@ -688,23 +695,31 @@ func (rf *Raft) checkLogEntries() {
 		}
 		if majority >= len(rf.peers)/2+1 {
 			rf.commitIndex = i
+			rf.applyCond.Signal()
 			log.Errorf("%d rf.commitIndex:%d\n", rf.me, rf.commitIndex)
 		}
 	}
+}
 
-	// flag := false
-	for rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied {
-		log.Errorf("%d:%v", rf.me, time.Now())
-		rf.lastApplied++
-		fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.at(rf.lastApplied))
-		c := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.logEntries.at(rf.lastApplied).Command,
-			CommandIndex: rf.lastApplied,
+func (rf *Raft) apply() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for !rf.killed() {
+		if rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied {
+			rf.lastApplied++
+			fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.at(rf.lastApplied))
+			c := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logEntries.at(rf.lastApplied).Command,
+				CommandIndex: rf.lastApplied,
+			}
+			rf.mu.Unlock()
+			rf.applyCh <- c
+			rf.mu.Lock()
+		} else {
+			rf.applyCond.Wait()
 		}
-		rf.mu.Unlock()
-		rf.applyCh <- c
-		rf.mu.Lock()
 	}
 }
 
@@ -758,6 +773,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.heartbeatCh = make(chan struct{}, 100)
 	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.votedFor = NONE
 	rf.role = FOLLOWER // follower
 	rf.count = len(peers)
@@ -773,6 +789,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	fmt.Printf("%d begin raft term:%d log:%v\n", rf.me, rf.currentTerm, rf.logEntries)
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.apply()
 	// go rf.syncLogEntries(applyCh)
 
 	return rf
