@@ -253,6 +253,32 @@ func (rf *Raft) updateRoleWithoutLock(role int) {
 	}
 }
 
+type InstallSnapshotArgs struct {
+	// Your data here (2D).
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludeTerm   int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	// Your data here (2D).
+	Term int
+}
+
+func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.Installsnapshot", args, reply)
+	return ok
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -679,6 +705,27 @@ func (rf *Raft) doLeader() {
 				}
 			}
 		}(peerIndex)
+	}
+}
+
+func (rf *Raft) doSnapshot(peer, logIndex, logTerm int, data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role != LEADER {
+		return
+	}
+	args := &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: logIndex,
+		LastIncludeTerm:   logTerm,
+		Data:              data,
+	}
+	reply := &InstallSnapshotReply{}
+	rf.sendInstallSnapshot(peer, args, reply)
+	if reply.Term > rf.currentTerm {
+		rf.updateTermWithoutLock(reply.Term)
+		rf.updateRoleWithoutLock(FOLLOWER)
 	}
 }
 
