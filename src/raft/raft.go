@@ -340,7 +340,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 		w := new(bytes.Buffer)
 		e := labgob.NewEncoder(w)
-		v := tmpLog[rf.commitIndex].Command
+		v := log.Command
 		e.Encode(v)
 
 		applyMsg := ApplyMsg{
@@ -352,7 +352,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 		rf.mu.Lock()
-		fmt.Printf("%d applysnapshot %v\n", rf.me, applyMsg)
+		fmt.Printf("%d applysnapshot %v apply: %v\n", rf.me, tmpLog[rf.commitIndex], applyMsg)
 	}
 	return
 }
@@ -800,20 +800,15 @@ func (rf *Raft) doSnapshot(peer, logIndex int) {
 	}
 
 	snapDataByte := rf.persister.ReadSnapshot()
-	snapData := rf.readSnapshot(snapDataByte)
-	if snapData == nil || len(snapData) == 0 {
+	if snapDataByte == nil || len(snapDataByte) == 0 {
 		return
 	}
 	fmt.Printf("%d snapshot!!!!%d\n", rf.me, peer)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(snapData)
-	data := w.Bytes()
 	args := &InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
-		LastIncludedIndex: logIndex,
-		Data:              data,
+		LastIncludedIndex: logIndex - 1,
+		Data:              snapDataByte,
 	}
 	reply := &InstallSnapshotReply{}
 	rf.mu.Unlock()
