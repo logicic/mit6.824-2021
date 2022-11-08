@@ -51,9 +51,10 @@ func (l *Log) at(index int) *Entry {
 	return &Entry{-1, l.Term0, l.Index0 - 1}
 }
 
-func (l *Log) slice(idx int) {
+func (l *Log) slice(idx int) []Entry {
+	temp := l.Entries[:idx-l.Index0]
 	l.Entries = l.Entries[idx-l.Index0:]
-
+	return temp
 }
 
 func (l *Log) lastLog() *Entry {

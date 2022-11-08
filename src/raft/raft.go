@@ -180,6 +180,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
+func (rf *Raft) readSnapshot(data []byte) []Entry {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return nil
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var log []Entry
+	if d.Decode((&log)) != nil {
+		fmt.Printf("%d Decode err", rf.me)
+		return nil
+	} else {
+		return log
+	}
+}
+
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -202,7 +217,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	// update logEntries, cut off it
 	term := rf.logEntries.at(index).Term
-	rf.logEntries.slice(index + 1)
+	snapshotSlice := rf.logEntries.slice(index + 1)
 	rf.logEntries.setIndex0(index+1, term)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -211,10 +226,33 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	e.Encode(rf.logEntries)
 	data := w.Bytes()
 	if snapshot != nil || len(snapshot) > 0 {
-		rf.persister.SaveStateAndSnapshot(data, snapshot)
-	} else {
-		rf.persister.SaveRaftState(data)
+		temp := rf.persister.ReadSnapshot()
+		snapData := rf.readSnapshot(temp)
+		fmt.Printf("%d snapData:%v\n", rf.me, snapData)
+		if snapData != nil {
+			snapshotIndex := len(snapData) - 1
+			if snapshotIndex < index {
+				snapData = append(snapData, snapshotSlice...)
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(snapData)
+				complateSnapshot := w.Bytes()
+				rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+			} else {
+				rf.persister.SaveRaftState(data)
+				return
+			}
+		} else {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(snapshotSlice)
+			complateSnapshot := w.Bytes()
+			rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+		}
+		return
+		// rf.persister.SaveStateAndSnapshot(data, append(temp, snapshot...))
 	}
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -268,9 +306,18 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	// Your code here (2A, 2B).
+	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	rf.heartbeatCh <- struct{}{}
+	rf.updateTermWithoutLock(args.Term)
+	rf.updateRoleWithoutLock(FOLLOWER)
+
 	return
 }
 
@@ -649,6 +696,7 @@ func (rf *Raft) doLeader() {
 				} else {
 					fmt.Printf("send Installsnapshot rpc!\n")
 					rf.mu.Unlock()
+					rf.doSnapshot(pindex, nextIndex)
 					return
 				}
 
@@ -708,17 +756,29 @@ func (rf *Raft) doLeader() {
 	}
 }
 
-func (rf *Raft) doSnapshot(peer, logIndex, logTerm int, data []byte) {
+func (rf *Raft) doSnapshot(peer, logIndex int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.role != LEADER {
 		return
 	}
+	snapDataByte := rf.persister.ReadSnapshot()
+	snapData := rf.readSnapshot(snapDataByte)
+	if snapData == nil || len(snapData) == 0 {
+		return
+	}
+	if len(snapData)-1 < logIndex {
+		return
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(snapData[:logIndex+1])
+	data := w.Bytes()
 	args := &InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
 		LastIncludedIndex: logIndex,
-		LastIncludeTerm:   logTerm,
+		LastIncludeTerm:   snapData[logIndex].Term,
 		Data:              data,
 	}
 	reply := &InstallSnapshotReply{}
