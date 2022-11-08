@@ -202,7 +202,11 @@ func (rf *Raft) readSnapshot(data []byte) []Entry {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-
+	rf.Snapshot(lastIncludedIndex, snapshot)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.commitIndex = lastIncludedIndex
+	fmt.Printf("%d CondInstallSnapshot!!\n", rf.me)
 	return true
 }
 
@@ -318,6 +322,38 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
 
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	if len(args.Data) <= 0 {
+		return
+	}
+	tmpLog := rf.readSnapshot(args.Data)
+	if tmpLog == nil {
+		return
+	}
+	rf.logEntries.Entries = tmpLog
+	for _, log := range tmpLog {
+		if log.Index < rf.commitIndex {
+			continue
+		}
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		v := tmpLog[rf.commitIndex].Command
+		e.Encode(v)
+
+		applyMsg := ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      w.Bytes(),
+			SnapshotTerm:  log.Term,
+			SnapshotIndex: log.Index,
+		}
+		rf.mu.Unlock()
+		rf.applyCh <- applyMsg
+		rf.mu.Lock()
+		fmt.Printf("%d applysnapshot %v\n", rf.me, applyMsg)
+	}
 	return
 }
 
@@ -696,7 +732,7 @@ func (rf *Raft) doLeader() {
 				} else {
 					fmt.Printf("send Installsnapshot rpc!\n")
 					rf.mu.Unlock()
-					rf.doSnapshot(pindex, nextIndex)
+					rf.doSnapshot(pindex, rf.logEntries.Index0)
 					return
 				}
 
@@ -762,31 +798,39 @@ func (rf *Raft) doSnapshot(peer, logIndex int) {
 	if rf.role != LEADER {
 		return
 	}
+
 	snapDataByte := rf.persister.ReadSnapshot()
 	snapData := rf.readSnapshot(snapDataByte)
 	if snapData == nil || len(snapData) == 0 {
 		return
 	}
-	if len(snapData)-1 < logIndex {
-		return
-	}
+	fmt.Printf("%d snapshot!!!!%d\n", rf.me, peer)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(snapData[:logIndex+1])
+	e.Encode(snapData)
 	data := w.Bytes()
 	args := &InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
 		LastIncludedIndex: logIndex,
-		LastIncludeTerm:   snapData[logIndex].Term,
 		Data:              data,
 	}
 	reply := &InstallSnapshotReply{}
-	rf.sendInstallSnapshot(peer, args, reply)
-	if reply.Term > rf.currentTerm {
-		rf.updateTermWithoutLock(reply.Term)
-		rf.updateRoleWithoutLock(FOLLOWER)
+	rf.mu.Unlock()
+	if rf.sendInstallSnapshot(peer, args, reply) {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.updateTermWithoutLock(reply.Term)
+			rf.updateRoleWithoutLock(FOLLOWER)
+			return
+		}
+		rf.nextIndex[peer] = logIndex
+		rf.matchIndex[peer] = logIndex - 1
+		fmt.Printf("snapshot %d append nextIndex[%d]:%v\n", rf.me, peer, rf.nextIndex)
+	} else {
+		rf.mu.Lock()
 	}
+
 }
 
 func (rf *Raft) checkLogEntries() {
