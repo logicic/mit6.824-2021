@@ -87,6 +87,7 @@ type Raft struct {
 	applyCh    chan ApplyMsg
 
 	applyCond *sync.Cond
+	snaping   bool
 }
 
 const (
@@ -327,6 +328,10 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
 
+	if rf.snaping {
+		return
+	}
+
 	if args.LastIncludedIndex <= rf.commitIndex {
 		return
 	}
@@ -343,6 +348,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if len(rf.logEntries.Entries) == 0 || rf.logEntries.Entries[0].Index <= rf.lastApplied {
 		return
 	}
+	rf.snaping = true
 	fmt.Printf("%d recv snapshot[%d-%d]\n", rf.me, rf.logEntries.Entries[0].Index, rf.logEntries.Entries[len(rf.logEntries.Entries)-1].Index)
 	for _, log := range rf.logEntries.Entries {
 		if log.Index < rf.logEntries.Index0 || log.Index < rf.lastApplied {
@@ -370,6 +376,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.commitIndex = min(rf.logEntries.len(), args.LastIncludedIndex)
 		fmt.Printf("%d have updated commitIndex into %d\n", rf.me, rf.commitIndex)
 	}
+	rf.snaping = false
 	// rf.commitIndex = args.LastIncludedIndex
 	return
 }
@@ -397,7 +404,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartbeatCh <- struct{}{}
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
-
+	if rf.snaping {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
 	if args.PrevLogIndex < 0 {
 		reply.Success = false
 		reply.RealNextIndex = NONE
@@ -870,7 +881,7 @@ func (rf *Raft) apply() {
 	defer rf.mu.Unlock()
 
 	for !rf.killed() {
-		if rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied {
+		if rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied && rf.lastApplied+1 >= rf.logEntries.Index0 {
 			rf.lastApplied++
 			fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d].index0[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.Index0, rf.logEntries.at(rf.lastApplied))
 			c := ApplyMsg{
@@ -935,6 +946,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.snaping = false
 	rf.heartbeatCh = make(chan struct{}, 100)
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
