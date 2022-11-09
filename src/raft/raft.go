@@ -203,9 +203,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 	// Your code here (2D).
 	rf.Snapshot(lastIncludedIndex, snapshot)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.commitIndex = lastIncludedIndex
 	fmt.Printf("%d CondInstallSnapshot!!\n", rf.me)
 	return true
 }
@@ -220,6 +217,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// update logEntries, cut off it
+	if rf.logEntries.Index0 >= index+1 {
+		return
+	}
 	term := rf.logEntries.at(index).Term
 	snapshotSlice := rf.logEntries.slice(index + 1)
 	rf.logEntries.setIndex0(index+1, term)
@@ -233,7 +233,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		temp := rf.persister.ReadSnapshot()
 		snapData := rf.readSnapshot(temp)
 		fmt.Printf("%d snapData:%v\n", rf.me, snapData)
-		if snapData != nil {
+		if snapData != nil && len(snapData) > 0 {
 			snapshotIndex := len(snapData) - 1
 			if snapshotIndex < index {
 				snapData = append(snapData, snapshotSlice...)
@@ -242,8 +242,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 				e.Encode(snapData)
 				complateSnapshot := w.Bytes()
 				rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+				fmt.Printf("%d SaveStateAndSnapshot1 data%d\n", rf.me, snapData)
+				return
 			} else {
 				rf.persister.SaveRaftState(data)
+				fmt.Printf("%d SaveRaftState1 data%d\n", rf.me, rf.logEntries)
 				return
 			}
 		} else {
@@ -252,11 +255,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			e.Encode(snapshotSlice)
 			complateSnapshot := w.Bytes()
 			rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+			fmt.Printf("%d SaveStateAndSnapshot2 data%d\n", rf.me, snapData)
 		}
 		return
 		// rf.persister.SaveStateAndSnapshot(data, append(temp, snapshot...))
 	}
 	rf.persister.SaveRaftState(data)
+	fmt.Printf("%d SaveRaftState2 data%d\n", rf.me, rf.logEntries)
 }
 
 //
@@ -333,9 +338,10 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if tmpLog == nil {
 		return
 	}
-	rf.logEntries.Entries = tmpLog
-	for _, log := range tmpLog {
-		if log.Index < rf.commitIndex {
+
+	rf.logEntries.Entries = tmpLog[rf.logEntries.Index0:]
+	for _, log := range rf.logEntries.Entries {
+		if log.Index < rf.logEntries.Index0 {
 			continue
 		}
 		w := new(bytes.Buffer)
@@ -352,8 +358,10 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 		rf.mu.Lock()
-		fmt.Printf("%d applysnapshot %v apply: %v\n", rf.me, tmpLog[rf.commitIndex], applyMsg)
+		fmt.Printf("%d applysnapshot %v apply: %v\n", rf.me, log.Command, applyMsg)
+		rf.lastApplied = log.Index
 	}
+	rf.commitIndex = args.LastIncludedIndex
 	return
 }
 
