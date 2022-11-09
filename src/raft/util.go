@@ -71,3 +71,10 @@ func (l *Log) move(pre, length int) []Entry {
 	}
 	return l.Entries[pre-l.Index0 : length-l.Index0]
 }
+
+func min(num1, num2 int) int {
+	if num1 < num2 {
+		return num1
+	}
+	return num2
+}

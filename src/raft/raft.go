@@ -341,7 +341,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.logEntries.Entries = tmpLog[rf.logEntries.Index0:]
 	for _, log := range rf.logEntries.Entries {
-		if log.Index < rf.logEntries.Index0 {
+		if log.Index < rf.logEntries.Index0 || log.Index < rf.lastApplied {
 			continue
 		}
 		w := new(bytes.Buffer)
@@ -355,13 +355,17 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotTerm:  log.Term,
 			SnapshotIndex: log.Index,
 		}
+		rf.lastApplied = log.Index
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 		rf.mu.Lock()
 		fmt.Printf("%d applysnapshot %v apply: %v\n", rf.me, log.Command, applyMsg)
-		rf.lastApplied = log.Index
 	}
-	rf.commitIndex = args.LastIncludedIndex
+	if args.LastIncludedIndex > rf.commitIndex {
+		rf.commitIndex = min(rf.logEntries.len(), args.LastIncludedIndex)
+		fmt.Printf("%d have updated commitIndex into %d\n", rf.me, rf.commitIndex)
+	}
+	// rf.commitIndex = args.LastIncludedIndex
 	return
 }
 
@@ -739,8 +743,9 @@ func (rf *Raft) doLeader() {
 					copy(logs, temp)
 				} else {
 					fmt.Printf("send Installsnapshot rpc!\n")
+					index0 := rf.logEntries.Index0
 					rf.mu.Unlock()
-					rf.doSnapshot(pindex, rf.logEntries.Index0)
+					rf.doSnapshot(pindex, index0)
 					return
 				}
 
@@ -862,7 +867,7 @@ func (rf *Raft) apply() {
 	for !rf.killed() {
 		if rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied {
 			rf.lastApplied++
-			fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.at(rf.lastApplied))
+			fmt.Printf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d].index0[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.Index0, rf.logEntries.at(rf.lastApplied))
 			c := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logEntries.at(rf.lastApplied).Command,
