@@ -340,6 +340,10 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.logEntries.Entries = tmpLog[rf.logEntries.Index0:]
+	if len(rf.logEntries.Entries) == 0 || rf.logEntries.Entries[0].Index <= rf.lastApplied {
+		return
+	}
+	fmt.Printf("%d recv snapshot[%d-%d]\n", rf.me, rf.logEntries.Entries[0].Index, rf.logEntries.Entries[len(rf.logEntries.Entries)-1].Index)
 	for _, log := range rf.logEntries.Entries {
 		if log.Index < rf.logEntries.Index0 || log.Index < rf.lastApplied {
 			continue
@@ -356,10 +360,11 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotIndex: log.Index,
 		}
 		rf.lastApplied = log.Index
+		fmt.Printf("%d applysnapshot1 %v apply: %v\n", rf.me, log.Command, applyMsg)
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 		rf.mu.Lock()
-		fmt.Printf("%d applysnapshot %v apply: %v\n", rf.me, log.Command, applyMsg)
+		fmt.Printf("%d applysnapshot2 %v apply: %v\n", rf.me, log.Command, applyMsg)
 	}
 	if args.LastIncludedIndex > rf.commitIndex {
 		rf.commitIndex = min(rf.logEntries.len(), args.LastIncludedIndex)
@@ -816,7 +821,7 @@ func (rf *Raft) doSnapshot(peer, logIndex int) {
 	if snapDataByte == nil || len(snapDataByte) == 0 {
 		return
 	}
-	fmt.Printf("%d snapshot!!!!%d\n", rf.me, peer)
+	fmt.Printf("%d snapshot[%d]!!!!%d\n", rf.me, logIndex, peer)
 	args := &InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
