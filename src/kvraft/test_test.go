@@ -261,6 +261,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			}()
 			last := "" // only used when not randomkeys
 			if !randomkeys {
+				log.Printf("CAO!!! %v\n", last)
 				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
 			}
 			for atomic.LoadInt32(&done_clients) == 0 {

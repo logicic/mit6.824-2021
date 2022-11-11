@@ -90,9 +90,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	DPrintf("%d begin!\n", kv.me)
 	select {
 	case c := <-kv.applyCh:
 		op := c.Command.(Op)
+		DPrintf("%d get command %v\n", kv.me, op)
 		kv.mu.Lock()
 		if op.Op == 1 {
 			// Put

@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"math/big"
+	"sync"
 
 	"crypto/rand"
 	mrand "math/rand"
@@ -13,6 +14,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	leader int
+	mu     sync.Mutex
 }
 
 func nrand() int64 {
@@ -45,18 +47,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := GetArgs{
 		Key: key,
 	}
 	reply := GetReply{}
-	if ck.leader != -1 {
-		if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
-			if reply.Err == OK {
-				return reply.Value
-			}
-		}
-	}
-	for i := 0; i < len(ck.servers); i++ {
+	// if ck.leader != -1 {
+	// 	if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
+	// 		if reply.Err == OK {
+	// 			return reply.Value
+	// 		}
+	// 	}
+	// }
+	for {
+		i := mrand.Intn(len(ck.servers))
 		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
 			if reply.Err == OK {
 				ck.leader = i
@@ -83,23 +88,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	if key == "" || value == "" {
-		return
-	}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,
 		Op:    op,
 	}
 	reply := PutAppendReply{}
-	if ck.leader != -1 {
-		DPrintf("first client send to server[%d] %v\n", ck.leader, args)
-		if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
-			if reply.Err == OK {
-				return
-			}
-		}
-	}
+	// if ck.leader != -1 {
+	// 	DPrintf("first client send to server[%d] %v\n", ck.leader, args)
+	// 	if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
+	// 		if reply.Err == OK {
+	// 			return
+	// 		}
+	// 	}
+	// }
 	for {
 		i := mrand.Intn(len(ck.servers))
 		DPrintf("client send to server[%d] %v\n", i, args)
@@ -113,6 +117,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
+	DPrintf("????????%v\n", value)
 	ck.PutAppend(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {
