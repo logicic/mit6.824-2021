@@ -178,6 +178,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logEntries = log
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
+		rf.lastApplied = log.Index0 - 1
 	}
 }
 
@@ -319,6 +320,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	fmt.Printf("%d LastIncludedIndex:%d commitIndex:%d Index0:%d lastApplied:%d\n", rf.me, args.LastIncludedIndex, rf.commitIndex, rf.logEntries.Index0, rf.lastApplied)
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		return
