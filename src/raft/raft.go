@@ -19,7 +19,6 @@ package raft
 
 import (
 	"bytes"
-	// "fmt"
 
 	"math/rand"
 	"sync"
@@ -28,7 +27,6 @@ import (
 
 	"6.824/labgob"
 	"6.824/labrpc"
-	log "github.com/sirupsen/logrus"
 )
 
 //
@@ -115,7 +113,6 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	isleader = rf.role == LEADER
 	term = rf.currentTerm
-	log.Errorf("%d get state: term is %d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 	return term, isleader
 }
 
@@ -513,7 +510,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	DPrintf("!!!!call request vote! %d vote to %d!rf.term:%d args.term:%d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
 	if rf.currentTerm >= args.Term {
-		log.Errorf("%d's current term is %d, remote %d term is %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -523,12 +519,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("RequestVote :%d become follower!\n", rf.me)
 		if rf.role == LEADER {
 			// update role
-			log.Errorf("RequestVote :%d become follower!\n", rf.me)
 			rf.role = FOLLOWER
 		}
 	}
 	if rf.votedFor != NONE {
-		log.Errorf("%d has voted %d\n", rf.me, rf.votedFor)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -685,7 +679,6 @@ func (rf *Raft) doCandidate() {
 		args := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
 			LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 		gotVoted := 1
-		log.Errorf("%d term:%d, role:%d\n", rf.me, rf.currentTerm, rf.role)
 		rf.mu.Unlock()
 		for peerIndex := range rf.peers {
 			if peerIndex == rf.me {
@@ -787,7 +780,6 @@ func (rf *Raft) doLeader() {
 			rf.mu.Unlock()
 			reply := &AppendEntriesReply{}
 			if rf.sendAppendEntries(pindex, &args, reply) {
-				log.Infof("%d lastLogIndex:%d nextIndex:%d", rf.me, lastLogIndex, nextIndex)
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				if reply.Term > rf.currentTerm {
@@ -873,7 +865,6 @@ func (rf *Raft) checkLogEntries() {
 		if majority >= len(rf.peers)/2+1 {
 			rf.commitIndex = i
 			rf.applyCond.Signal()
-			log.Errorf("%d rf.commitIndex:%d\n", rf.me, rf.commitIndex)
 		}
 	}
 }
@@ -912,12 +903,10 @@ func (rf *Raft) ticker() {
 		if _, isLeader := rf.GetState(); !isLeader {
 			// electionTimeout := rand.Intn(300)+MeanArrivalTime
 			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(500) + 600
-			log.Errorf("%d's random time is %v timeAt:%v\n", rf.me, electionTimeout, time.Now())
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
 				rf.doCandidate()
 			case <-rf.heartbeatCh:
-				log.Debugf("%d recv heartbeat!\n", rf.me)
 			}
 		} else {
 			rf.doLeader()
@@ -941,7 +930,6 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	log.SetLevel(log.PanicLevel)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
