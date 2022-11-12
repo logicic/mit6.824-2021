@@ -22,6 +22,18 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+/*
+Note:
+在RequestVote function中添加了更严格的投票限制。
+因为debug发现，有同一个任期，竟然有不同的serverID曾任leader。
+错误原因：crash的节点在重启后，由与拿来的leader role变为
+follower role，是平替的，即follower 的term和leder时的term时一样的，
+由别的node提醒，即append enter，term不够，requestVote term不够，收到心跳包时
+update term。那么，就会出现两个相同的term但command不同的log，由于判断是基于term，
+其实按照raft的代码，这两个不同command的log都是合法的，但是是不同log。
+或者是ABC三个server，A为leader，任期为8，刚竞选成功，还没来得及发送心跳包，挂掉了，BC仍然为7任期，follower，它们在选举timeout发生后，开始竞选，BC都是有可能成为leader的，假设B成为leader，那么任期为8，那么任期为8，历史上曾经是两个不同的server，这个应该是不合理的地方。
+但是论文上写的确实是rf.currentTerm > args.Term，不投票，参考被别人的代码，好像这个case也会出现的样子，暂时想不通，我自己增加了这个限制，测试了100此2A 2B 2C都是通过的
+*/
 //
 // example RequestVote RPC handler.
 //
@@ -29,7 +41,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("!!!!call request vote! %d vote to %d!rf.term:%d args.term:%d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+	DPrintf("call1 request vote! %d vote to %d!rf.term:%d args.term:%d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+	// 1. 任期判断
 	if rf.currentTerm >= args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -43,12 +56,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.role = FOLLOWER
 		}
 	}
+	// 2.是否已经投过票
 	if rf.votedFor != NONE {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
 
+	// 3. paper5.4，投票限制，lastLogTerm是否大，等大的话需要比较长度
 	currentLastLogEntries := rf.logEntries.lastIndex()
 	currentLastEntryTerm := rf.logEntries.at(currentLastLogEntries).Term
 	if currentLastLogEntries != 0 {
@@ -68,7 +83,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("%d diao!\n", rf.me)
 	}
 
-	DPrintf("call request vote! %d vote to %d!\n", rf.me, args.CandidateId)
+	// 4. 完成投票
+	DPrintf("call2 request vote! %d vote to %d!\n", rf.me, args.CandidateId)
 	rf.heartbeatCh <- struct{}{}
 	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
@@ -121,7 +137,7 @@ func (rf *Raft) electLeader() {
 		lastLogTerm := rf.logEntries.at(lastLogIndex).Term
 		args := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
 			LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
-		gotVoted := 1
+		gotVoted := 1 //  vote to myself
 		rf.mu.Unlock()
 		for peerIndex := range rf.peers {
 			if peerIndex == rf.me {
@@ -131,6 +147,7 @@ func (rf *Raft) electLeader() {
 				reply := &RequestVoteReply{}
 				if rf.sendRequestVote(pindex, args, reply) {
 					rf.mu.Lock()
+					// 1. 检查是否任期是否符合要求
 					if reply.Term > rf.currentTerm {
 						rf.updateTermWithoutLock(reply.Term)
 						rf.updateRoleWithoutLock(FOLLOWER)
@@ -139,16 +156,26 @@ func (rf *Raft) electLeader() {
 						return
 					}
 
+					// 2. 检查是否是过期的reply， 因为会有网络延迟等因素，需要代码确保还具有时效性
 					if rf.role != CANDIDATE || reply.Term != rf.currentTerm {
 						// ignore outdated requestVoteReply
 						rf.mu.Unlock()
 						return
 					}
 
+					// 3. 获得投票
 					if reply.VoteGranted {
 						gotVoted++
 					}
 
+					// 4. 判断是否达到绝大多数的投票
+					/*
+						4.1 update role to Leader
+						4.2 reset votedFor
+						4.3 reset nextIndex matchIndex
+						4.4 reset election Timeout
+						4.5 send heartbeat/appendEntries 宣告自己是leader
+					*/
 					if gotVoted > len(rf.peers)/2 {
 						DPrintf("%d become leader!At:%d\n", rf.me, rf.currentTerm)
 						rf.updateRoleWithoutLock(LEADER)
