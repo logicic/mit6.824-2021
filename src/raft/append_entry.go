@@ -1,5 +1,16 @@
 package raft
 
+/*
+整个append log entry的过程是：
+1. start() function append logEntry to leader's logEntry
+2. logEntry.Len() >= nextIndex , append logEntry to peer
+3. if ok, update 对应的nextIndex，matchIndex
+3.1 if failed, update 对应的nextIndex，进行回退尝试逻辑
+4. logEntry.Len() > commitedIndex, 触发matchIndex的绝大多数的比较
+4.1 如果matchIndex获得绝大多数的认可，则说明当前commitedIndex可以更新
+5. commitedIndex的更新，发送signal同步，appliedIndex的更新，appliedIndex更新则说明可以发送到state machine
+*/
+
 //
 // example AppendEntries RPC arguments structure.
 // field names must start with capital letters!
@@ -33,21 +44,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("%d will recv %d logs:%v prevIndex:%d prevTerm:%d rf.term:%d args.term:%d\n", rf.me, args.LeaderId, args.LogEntries, args.PrevLogIndex, args.PrevLogTerm, rf.currentTerm, args.Term)
+	// 1. 判定任期
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
+	// 2. reset electionTimeout 更新相关状态
 	// refresh electionTimer
 	rf.heartbeatCh <- struct{}{}
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
+	// 3. 当处于installSnapshot的状态时，阻止进行append entries在心跳包的操作，简化logEntry的同步
 	if rf.snaping {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
+	// 4. 判断preLogIndex
 	if args.PrevLogIndex < 0 {
 		reply.Success = false
 		reply.RealNextIndex = NONE
@@ -57,7 +72,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	reply.Term = rf.currentTerm
 
-	// DPrintf("%d will recv %d logs:%v prevIndex:%d prevTerm:%d rf.term:%d args.term:%d\n", rf.me, args.LeaderId, args.LogEntries, args.PrevLogIndex, args.PrevLogTerm, rf.currentTerm, args.Term)
+	// 5. 判断得出prevLogIndex不符合或者prevLogTerm不匹配，进行一些操作找到比较贴近的realNextIndex告诉leader
+	// 在进行下轮appendEntry的时候可以更快一些，在早的版本里是没有这个的，直接让leader的nextIndex--
 	// append logentry
 	if args.PrevLogIndex > rf.logEntries.lastIndex() || rf.logEntries.at(args.PrevLogIndex).Term != args.PrevLogTerm {
 		DPrintf("%d append leader %d prevLogIndex:%d prevLogTerm:%d\n", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
@@ -80,6 +96,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// 6. 一切都符合条件后，进行append，append又分为，替换和append两步
 	if len(args.LogEntries) > 0 {
 		for i, v := range args.LogEntries {
 			index := args.PrevLogIndex + 1 + i
@@ -100,10 +117,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("%d term:%d logs:%v\n", rf.me, rf.currentTerm, rf.logEntries)
 	}
 
+	// 7. follower的log apply是通过leader告诉follower，leader已经成功commit了，你也可以进行commit了
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.logEntries.lastIndex())
 	}
 
+	// 8. 更新好follower.commitIndex后，就可以通知follower apply新的logEnries了
 	rf.applyCond.Signal()
 	return
 }
@@ -122,10 +141,12 @@ func (rf *Raft) appendEntries() {
 		go func(pindex int) {
 			var args AppendEntriesArgs
 			rf.mu.Lock()
+			// 1. double check 再次检查是否是leder，防止过期请求对当前状态影响
 			if rf.role != LEADER {
 				rf.mu.Unlock()
 				return
 			}
+			// 2. 准备参数
 			currentTerm := rf.currentTerm
 			lastLogIndex := rf.logEntries.lastIndex()
 			nextIndex := rf.nextIndex[pindex]
@@ -142,40 +163,33 @@ func (rf *Raft) appendEntries() {
 					copy(logs, temp)
 				} else {
 					DPrintf("send Installsnapshot rpc!\n")
-					index0 := rf.logEntries.getIndex0()
 					rf.mu.Unlock()
-					rf.doSnapshot(pindex, index0)
+					rf.doSnapshot(pindex)
 					return
 				}
-
-				args = AppendEntriesArgs{
-					Term:         currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: nextIndex - 1,
-					PrevLogTerm:  preterm,
-					LogEntries:   logs,
-					LeaderCommit: commitIndex,
-				}
-			} else {
-				args = AppendEntriesArgs{
-					Term:         currentTerm,
-					LeaderId:     rf.me,
-					LeaderCommit: commitIndex,
-					PrevLogIndex: nextIndex - 1,
-					PrevLogTerm:  preterm,
-				}
+			}
+			args = AppendEntriesArgs{
+				Term:         currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: nextIndex - 1,
+				PrevLogTerm:  preterm,
+				LogEntries:   logs,
+				LeaderCommit: commitIndex,
 			}
 			rf.mu.Unlock()
 			reply := &AppendEntriesReply{}
+			// 3. 发送到除了自己外的所有peer，leder并不知道谁在线还是不在线
 			if rf.sendAppendEntries(pindex, &args, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
+				// 3.1 处理任期问题
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.updateRoleWithoutLock(FOLLOWER)
 					DPrintf("who[%d] leader :%d become follower!\n", pindex, rf.me)
 					return
 				}
+				// 3.2 过期请求的判定
 				if rf.role == LEADER && reply.Term == rf.currentTerm {
 
 					// append
@@ -183,6 +197,7 @@ func (rf *Raft) appendEntries() {
 						// out-dated reply
 						return
 					}
+					// 3.3 请求成功， 更新nextIndex，以驱动下一次的append
 					if reply.Success {
 						rf.nextIndex[pindex] = nextIndex + len(logs)
 						rf.matchIndex[pindex] = nextIndex + len(logs) - 1
@@ -192,6 +207,7 @@ func (rf *Raft) appendEntries() {
 
 					} else {
 						// retry
+						// 3.4 失败，log任期不对，进行回退and retry
 						rf.nextIndex[pindex] = reply.RealNextIndex
 						DPrintf("%d not append nextIndex[%d]:%v\n", rf.me, pindex, rf.nextIndex)
 
