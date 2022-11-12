@@ -179,75 +179,6 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-	rf.Snapshot(lastIncludedIndex, snapshot)
-	DPrintf("%d CondInstallSnapshot!!\n", rf.me)
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-	DPrintf("%d snapshot[%d] !!!!!\n", rf.me, index)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// update logEntries, cut off it
-	if rf.logEntries.Index0 >= index+1 {
-		return
-	}
-	term := rf.logEntries.at(index).Term
-	snapshotSlice := rf.logEntries.slice(index + 1)
-	rf.logEntries.setIndex0(index+1, term)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logEntries)
-	data := w.Bytes()
-	if snapshot != nil || len(snapshot) > 0 {
-		temp := rf.persister.ReadSnapshot()
-		snapData := rf.readSnapshot(temp)
-		DPrintf("%d snapData:%v\n", rf.me, snapData)
-		if snapData != nil && len(snapData) > 0 {
-			snapshotIndex := len(snapData) - 1
-			if snapshotIndex < index {
-				snapData = append(snapData, snapshotSlice...)
-				w := new(bytes.Buffer)
-				e := labgob.NewEncoder(w)
-				e.Encode(snapData)
-				complateSnapshot := w.Bytes()
-				rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
-				DPrintf("%d SaveStateAndSnapshot1 data%d\n", rf.me, snapData)
-				return
-			} else {
-				rf.persister.SaveRaftState(data)
-				DPrintf("%d SaveRaftState1 data%d\n", rf.me, rf.logEntries)
-				return
-			}
-		} else {
-			w := new(bytes.Buffer)
-			e := labgob.NewEncoder(w)
-			e.Encode(snapshotSlice)
-			complateSnapshot := w.Bytes()
-			rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
-			DPrintf("%d SaveStateAndSnapshot2 data%d\n", rf.me, snapData)
-		}
-		return
-		// rf.persister.SaveStateAndSnapshot(data, append(temp, snapshot...))
-	}
-	rf.persister.SaveRaftState(data)
-	DPrintf("%d SaveRaftState2 data%d\n", rf.me, rf.logEntries)
-}
-
 func (rf *Raft) updateTermWithoutLock(term int) {
 	rf.votedFor = NONE
 	rf.currentTerm = term
@@ -285,16 +216,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
-	preIndex := len(rf.logEntries.Entries) + rf.logEntries.Index0
-	logItem := Entry{
+	nextIndex := rf.logEntries.len()
+	nextLogItem := Entry{
 		Command: command,
 		Term:    rf.currentTerm,
-		Index:   preIndex,
+		Index:   nextIndex,
 	}
-	rf.logEntries.append(logItem)
+	rf.logEntries.append(nextLogItem)
 	rf.persist()
 	term = rf.currentTerm
-	index = preIndex
+	index = nextIndex
 	rf.matchIndex[rf.me] = index
 	DPrintf("%d temr[%d] append logs in start log[%d]:%v\n", rf.me, rf.currentTerm, index, rf.logEntries.at(index))
 	rf.mu.Unlock()
@@ -327,9 +258,9 @@ func (rf *Raft) apply() {
 	defer rf.mu.Unlock()
 
 	for !rf.killed() {
-		if rf.commitIndex > rf.lastApplied && rf.logEntries.len()-1 > rf.lastApplied && rf.lastApplied+1 >= rf.logEntries.Index0 {
+		if rf.commitIndex > rf.lastApplied && rf.logEntries.lastIndex() > rf.lastApplied && rf.lastApplied+1 >= rf.logEntries.getIndex0() {
 			rf.lastApplied++
-			DPrintf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d].index0[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.len()-1, rf.lastApplied, rf.logEntries.Index0, rf.logEntries.at(rf.lastApplied))
+			DPrintf("%d term[%d] commitIndex[%d] lastLogIndex[%d] applyid logentry[%d].index0[%d]:%v\n", rf.me, rf.currentTerm, rf.commitIndex, rf.logEntries.lastIndex(), rf.lastApplied, rf.logEntries.Index0, rf.logEntries.at(rf.lastApplied))
 			c := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logEntries.at(rf.lastApplied).Command,
@@ -358,11 +289,11 @@ func (rf *Raft) ticker() {
 			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(500) + 600
 			select {
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
-				rf.doCandidate()
+				rf.electLeader()
 			case <-rf.heartbeatCh:
 			}
 		} else {
-			rf.doLeader()
+			rf.appendEntries()
 			if _, isLeader := rf.GetState(); isLeader {
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -390,14 +321,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.snaping = false
-	rf.heartbeatCh = make(chan struct{}, 100)
+	// 用来通知follower心跳包来了，reset选举定时器的计时
+	// 使用非阻塞channel，因为阻塞的话，有时候会死锁
+	// 这是因为我的定时器结构所导致的，没有使用time package的timer
+	rf.heartbeatCh = make(chan struct{}, 10)
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.votedFor = NONE
 	rf.role = FOLLOWER // follower
 	rf.count = len(peers)
 	rf.nextIndex = make([]int, rf.count)
-	// rf.logEntries = make([]LogEntry, 1) //logEntries first index is 1
 	rf.logEntries = makeEmptyLog()
 	rf.logEntries.append(Entry{-1, 0, 0})
 	rf.matchIndex = make([]int, rf.count)

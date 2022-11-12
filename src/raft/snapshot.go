@@ -6,6 +6,75 @@ import (
 	"6.824/labgob"
 )
 
+//
+// A service wants to switch to snapshot.  Only do so if Raft hasn't
+// have more recent info since it communicate the snapshot on applyCh.
+//
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+
+	// Your code here (2D).
+	rf.Snapshot(lastIncludedIndex, snapshot)
+	DPrintf("%d CondInstallSnapshot!!\n", rf.me)
+	return true
+}
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	// Your code here (2D).
+	DPrintf("%d snapshot[%d] !!!!!\n", rf.me, index)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// update logEntries, cut off it
+	if rf.logEntries.getIndex0() >= index+1 {
+		return
+	}
+	term := rf.logEntries.at(index).Term
+	snapshotSlice := rf.logEntries.slice(index + 1)
+	rf.logEntries.setIndex0(index+1, term)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logEntries)
+	data := w.Bytes()
+	if snapshot != nil || len(snapshot) > 0 {
+		temp := rf.persister.ReadSnapshot()
+		snapData := rf.readSnapshot(temp)
+		DPrintf("%d snapData:%v\n", rf.me, snapData)
+		if snapData != nil && len(snapData) > 0 {
+			snapshotIndex := len(snapData) - 1
+			if snapshotIndex < index {
+				snapData = append(snapData, snapshotSlice...)
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(snapData)
+				complateSnapshot := w.Bytes()
+				rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+				DPrintf("%d SaveStateAndSnapshot1 data%d\n", rf.me, snapData)
+				return
+			} else {
+				rf.persister.SaveRaftState(data)
+				DPrintf("%d SaveRaftState1 data%d\n", rf.me, rf.logEntries)
+				return
+			}
+		} else {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(snapshotSlice)
+			complateSnapshot := w.Bytes()
+			rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
+			DPrintf("%d SaveStateAndSnapshot2 data%d\n", rf.me, snapData)
+		}
+		return
+		// rf.persister.SaveStateAndSnapshot(data, append(temp, snapshot...))
+	}
+	rf.persister.SaveRaftState(data)
+	DPrintf("%d SaveRaftState2 data%d\n", rf.me, rf.logEntries)
+}
+
 func (rf *Raft) readSnapshot(data []byte) []Entry {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return nil
@@ -39,7 +108,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("%d LastIncludedIndex:%d commitIndex:%d Index0:%d lastApplied:%d\n", rf.me, args.LastIncludedIndex, rf.commitIndex, rf.logEntries.Index0, rf.lastApplied)
+	DPrintf("%d LastIncludedIndex:%d commitIndex:%d Index0:%d lastApplied:%d\n", rf.me, args.LastIncludedIndex, rf.commitIndex, rf.logEntries.getIndex0(), rf.lastApplied)
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		return
@@ -65,14 +134,14 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	rf.logEntries.Entries = tmpLog[rf.logEntries.Index0:]
-	if len(rf.logEntries.Entries) == 0 || rf.logEntries.Entries[0].Index <= rf.lastApplied {
+	rf.logEntries.modify(tmpLog[rf.logEntries.Index0:])
+	if rf.logEntries.len() == rf.logEntries.getIndex0() || rf.logEntries.getIndex0() <= rf.lastApplied {
 		return
 	}
 	rf.snaping = true
-	DPrintf("%d recv snapshot[%d-%d]\n", rf.me, rf.logEntries.Entries[0].Index, rf.logEntries.Entries[len(rf.logEntries.Entries)-1].Index)
-	for _, log := range rf.logEntries.Entries {
-		if log.Index < rf.logEntries.Index0 || log.Index < rf.lastApplied {
+	DPrintf("%d recv snapshot[%d-%d]\n", rf.me, rf.logEntries.getIndex0(), rf.logEntries.lastIndex())
+	for _, log := range rf.logEntries.getEntriesOnlyread() {
+		if log.Index < rf.logEntries.getIndex0() || log.Index < rf.lastApplied {
 			continue
 		}
 		w := new(bytes.Buffer)

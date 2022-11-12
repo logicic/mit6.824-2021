@@ -59,11 +59,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// DPrintf("%d will recv %d logs:%v prevIndex:%d prevTerm:%d rf.term:%d args.term:%d\n", rf.me, args.LeaderId, args.LogEntries, args.PrevLogIndex, args.PrevLogTerm, rf.currentTerm, args.Term)
 	// append logentry
-	if args.PrevLogIndex > rf.logEntries.len()-1 || rf.logEntries.at(args.PrevLogIndex).Term != args.PrevLogTerm {
+	if args.PrevLogIndex > rf.logEntries.lastIndex() || rf.logEntries.at(args.PrevLogIndex).Term != args.PrevLogTerm {
 		DPrintf("%d append leader %d prevLogIndex:%d prevLogTerm:%d\n", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.Success = false
-		if args.PrevLogIndex > rf.logEntries.len()-1 {
-			reply.RealNextIndex = rf.logEntries.len() - 1
+		if args.PrevLogIndex > rf.logEntries.lastIndex() {
+			reply.RealNextIndex = rf.logEntries.lastIndex()
 		} else {
 			conflictTerm := rf.logEntries.at(args.PrevLogIndex).Term
 			reply.RealNextIndex = 1
@@ -83,13 +83,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.LogEntries) > 0 {
 		for i, v := range args.LogEntries {
 			index := args.PrevLogIndex + 1 + i
-			if rf.logEntries.len()-1 >= index && rf.logEntries.at(index).Term != v.Term {
+			if rf.logEntries.lastIndex() >= index && rf.logEntries.at(index).Term != v.Term {
 				// overwrite existed log
 				// rf.logEntries = rf.logEntries[:index]
 				rf.logEntries.truncate(index)
 				rf.persist()
 			}
-			if rf.logEntries.len()-1 < index {
+			if rf.logEntries.lastIndex() < index {
 				// append new log
 				// rf.logEntries = append(rf.logEntries, args.LogEntries[i:]...)
 				rf.logEntries.append(args.LogEntries[i:]...)
@@ -101,16 +101,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit < rf.logEntries.len()-1 {
-			rf.commitIndex = args.LeaderCommit
-		} else {
-			rf.commitIndex = rf.logEntries.len() - 1
-		}
+		rf.commitIndex = min(args.LeaderCommit, rf.logEntries.lastIndex())
 	}
 
-	// rf.checkLogEntries()
 	rf.applyCond.Signal()
-	// rf.persist()
 	return
 }
 
@@ -119,7 +113,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) doLeader() {
+func (rf *Raft) appendEntries() {
 	for peerIndex := range rf.peers {
 		if peerIndex == rf.me {
 			continue
@@ -133,7 +127,7 @@ func (rf *Raft) doLeader() {
 				return
 			}
 			currentTerm := rf.currentTerm
-			lastLogIndex := rf.logEntries.len() - 1
+			lastLogIndex := rf.logEntries.lastIndex()
 			nextIndex := rf.nextIndex[pindex]
 			commitIndex := rf.commitIndex
 			preterm := rf.logEntries.Term0
@@ -148,7 +142,7 @@ func (rf *Raft) doLeader() {
 					copy(logs, temp)
 				} else {
 					DPrintf("send Installsnapshot rpc!\n")
-					index0 := rf.logEntries.Index0
+					index0 := rf.logEntries.getIndex0()
 					rf.mu.Unlock()
 					rf.doSnapshot(pindex, index0)
 					return
@@ -210,7 +204,7 @@ func (rf *Raft) doLeader() {
 }
 
 func (rf *Raft) checkLogEntries() {
-	for i := rf.commitIndex + 1; i <= rf.logEntries.len()-1 && rf.role == LEADER; i++ {
+	for i := rf.commitIndex + 1; i <= rf.logEntries.lastIndex() && rf.role == LEADER; i++ {
 		if rf.logEntries.at(i).Term != rf.currentTerm {
 			continue
 		}

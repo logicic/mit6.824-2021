@@ -49,7 +49,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	currentLastLogEntries := rf.logEntries.len() - 1
+	currentLastLogEntries := rf.logEntries.lastIndex()
 	currentLastEntryTerm := rf.logEntries.at(currentLastLogEntries).Term
 	if currentLastLogEntries != 0 {
 		if currentLastEntryTerm < args.LastLogTerm ||
@@ -110,14 +110,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) doCandidate() {
+func (rf *Raft) electLeader() {
 	rf.mu.Lock()
 	if rf.role != LEADER {
 		// candidate operation
 		rf.updateRoleWithoutLock(CANDIDATE)
 		rf.updateTermWithoutLock(rf.currentTerm + 1)
 		rf.votedFor = rf.me // vote to myself
-		lastLogIndex := rf.logEntries.len() - 1
+		lastLogIndex := rf.logEntries.lastIndex()
 		lastLogTerm := rf.logEntries.at(lastLogIndex).Term
 		args := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
 			LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
@@ -156,7 +156,7 @@ func (rf *Raft) doCandidate() {
 						rf.reInitializedLeaderStateWithoutLock()
 						rf.mu.Unlock()
 						rf.heartbeatCh <- struct{}{}
-						go rf.doLeader()
+						go rf.appendEntries()
 					} else {
 						rf.mu.Unlock()
 					}
@@ -172,13 +172,13 @@ func (rf *Raft) reInitializedLeaderStateWithoutLock() {
 	// reinitialized after election
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
-		rf.nextIndex[i] = rf.logEntries.len() - 1 + 1
+		rf.nextIndex[i] = rf.logEntries.len()
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.matchIndex {
 		rf.matchIndex[i] = 0
 	}
 	// 设置自己的matchIndex
-	rf.matchIndex[rf.me] = rf.logEntries.len() - 1
+	rf.matchIndex[rf.me] = rf.logEntries.lastIndex()
 
 }
