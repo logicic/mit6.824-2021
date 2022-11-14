@@ -1,15 +1,16 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,11 +19,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Op    int
+	Key   string
+	Value string
 }
 
 type KVServer struct {
@@ -35,15 +38,92 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvStore map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("%d GET kvStore:%v\n", kv.me, kv.kvStore)
+	value, ok := kv.kvStore[args.Key]
+	if !ok {
+		reply.Err = ErrNoKey
+		return
+	}
+	reply.Value = value
+	reply.Err = OK
+	return
+	// command := Op{
+	// 	Op:  0,
+	// 	Key: args.Key,
+	// }
+	// _, _, isLeader := kv.rf.Start(command)
+	// if !isLeader {
+	// 	reply.Err = ErrWrongLeader
+	// 	return
+	// }
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DPrintf("%d recv %v\n", kv.me, args)
+	o := -1
+	if args.Op == "Put" {
+		o = 1
+	} else if args.Op == "Append" {
+		o = 2
+	} else {
+		return
+	}
+	command := Op{
+		Op:    o,
+		Key:   args.Key,
+		Value: args.Value,
+	}
+	_, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	select {
+	case c := <-kv.applyCh:
+		op := c.Command.(Op)
+		kv.mu.Lock()
+		if op.Op == 1 {
+			// Put
+			kv.kvStore[op.Key] = op.Value
+		} else if op.Op == 2 {
+			// Append
+			kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
+		}
+		DPrintf("%d kvStore:%v\n", kv.me, kv.kvStore)
+		kv.mu.Unlock()
+	}
+	reply.Err = OK
+	DPrintf("%d finish!\n", kv.me)
+}
+
+func (kv *KVServer) apply() {
+	for !kv.killed() {
+		select {
+		case c := <-kv.applyCh:
+			op := c.Command.(Op)
+			kv.mu.Lock()
+			if op.Op == 1 {
+				// Put
+				kv.kvStore[op.Key] = op.Value
+			} else if op.Op == 2 {
+				// Append
+				kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
+			}
+			kv.mu.Unlock()
+		}
+	}
 }
 
 //
@@ -94,7 +174,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.kvStore = make(map[string]string)
 	// You may need initialization code here.
 
 	return kv
