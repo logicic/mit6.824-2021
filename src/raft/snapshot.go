@@ -128,7 +128,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	// 2. 发送installSnapshot也可以证明leader的存在
-	rf.heartbeatCh <- struct{}{}
+	rf.resetElectionTimer()
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
 

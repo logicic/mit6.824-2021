@@ -53,7 +53,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 2. reset electionTimeout 更新相关状态
 	// refresh electionTimer
-	rf.heartbeatCh <- struct{}{}
+	// rf.heartbeatCh <- struct{}{}
+	rf.resetElectionTimer()
 	rf.updateTermWithoutLock(args.Term)
 	rf.updateRoleWithoutLock(FOLLOWER)
 	// 3. 当处于installSnapshot的状态时，阻止进行append entries在心跳包的操作，简化logEntry的同步
@@ -120,10 +121,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 7. follower的log apply是通过leader告诉follower，leader已经成功commit了，你也可以进行commit了
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.logEntries.lastIndex())
+		// 8. 更新好follower.commitIndex后，就可以通知follower apply新的logEnries了
+		rf.applyCond.Signal()
 	}
 
-	// 8. 更新好follower.commitIndex后，就可以通知follower apply新的logEnries了
-	rf.applyCond.Signal()
 	return
 }
 

@@ -74,9 +74,9 @@ type Raft struct {
 	count      int
 
 	// volatile state on all servers
-	commitIndex int // index of highest log entry known to be committed(initalized to 0, increases monotonically)
-	lastApplied int // index of highest log entry applied to state machine(initalized to 0, increases monotonically)
-	heartbeatCh chan struct{}
+	commitIndex  int // index of highest log entry known to be committed(initalized to 0, increases monotonically)
+	lastApplied  int // index of highest log entry applied to state machine(initalized to 0, increases monotonically)
+	electionTime time.Time
 
 	// volatile state on leaders
 	// reinitialized after election
@@ -185,9 +185,7 @@ func (rf *Raft) updateTermWithoutLock(term int) {
 }
 
 func (rf *Raft) updateRoleWithoutLock(role int) {
-	if rf.role != role {
-		rf.role = role
-	}
+	rf.role = role
 }
 
 //
@@ -227,6 +225,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 	index = nextIndex
 	rf.matchIndex[rf.me] = index
+	rf.appendEntries()
 	DPrintf("%d temr[%d] append logs in start log[%d]:%v\n", rf.me, rf.currentTerm, index, rf.logEntries.at(index))
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -275,6 +274,12 @@ func (rf *Raft) apply() {
 	}
 }
 
+func (rf *Raft) resetElectionTimer() {
+	t := time.Now()
+	electionTimeout := time.Duration(100+rand.Intn(300)) * time.Millisecond
+	rf.electionTime = t.Add(electionTimeout)
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -284,20 +289,16 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		if _, isLeader := rf.GetState(); !isLeader {
-			// electionTimeout := rand.Intn(300)+MeanArrivalTime
-			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(500) + 600
-			select {
-			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
-				rf.electLeader()
-			case <-rf.heartbeatCh:
-			}
-		} else {
+		time.Sleep(100 * time.Millisecond)
+		rf.mu.Lock()
+		if rf.role == LEADER {
 			rf.appendEntries()
-			if _, isLeader := rf.GetState(); isLeader {
-				time.Sleep(100 * time.Millisecond)
-			}
 		}
+		if time.Now().After(rf.electionTime) {
+			DPrintf("%d ????", rf.me)
+			rf.electLeader()
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -324,7 +325,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 用来通知follower心跳包来了，reset选举定时器的计时
 	// 使用非阻塞channel，因为阻塞的话，有时候会死锁
 	// 这是因为我的定时器结构所导致的，没有使用time package的timer
-	rf.heartbeatCh = make(chan struct{}, 10)
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.votedFor = NONE
@@ -338,6 +338,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.resetElectionTimer()
 	DPrintf("%d begin raft term:%d log:%v\n", rf.me, rf.currentTerm, rf.logEntries)
 	// start ticker goroutine to start elections
 	go rf.ticker()

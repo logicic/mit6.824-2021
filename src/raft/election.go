@@ -42,20 +42,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("call1 request vote! %d vote to %d!rf.term:%d args.term:%d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+	rf.resetElectionTimer()
 	// 1. 任期判断
 	if rf.currentTerm >= args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
-	} else if rf.currentTerm < args.Term {
-		rf.updateTermWithoutLock(args.Term)
-		// rf.updateRoleWithoutLock(FOLLOWER)
-		DPrintf("RequestVote :%d become follower!\n", rf.me)
-		if rf.role == LEADER {
-			// update role
-			rf.role = FOLLOWER
-		}
 	}
+	rf.updateTermWithoutLock(args.Term)
+	rf.updateRoleWithoutLock(FOLLOWER)
+	DPrintf("RequestVote :%d become follower!\n", rf.me)
+
 	// 2.是否已经投过票
 	if rf.votedFor != NONE {
 		reply.Term = rf.currentTerm
@@ -85,7 +82,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 4. 完成投票
 	DPrintf("call2 request vote! %d vote to %d!\n", rf.me, args.CandidateId)
-	rf.heartbeatCh <- struct{}{}
 	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
@@ -127,18 +123,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) electLeader() {
-	rf.mu.Lock()
 	if rf.role != LEADER {
 		// candidate operation
 		rf.updateRoleWithoutLock(CANDIDATE)
 		rf.updateTermWithoutLock(rf.currentTerm + 1)
 		rf.votedFor = rf.me // vote to myself
+		rf.resetElectionTimer()
 		lastLogIndex := rf.logEntries.lastIndex()
 		lastLogTerm := rf.logEntries.at(lastLogIndex).Term
 		args := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
 			LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 		gotVoted := 1 //  vote to myself
-		rf.mu.Unlock()
 		for peerIndex := range rf.peers {
 			if peerIndex == rf.me {
 				continue
@@ -151,7 +146,7 @@ func (rf *Raft) electLeader() {
 					if reply.Term > rf.currentTerm {
 						rf.updateTermWithoutLock(reply.Term)
 						rf.updateRoleWithoutLock(FOLLOWER)
-						rf.heartbeatCh <- struct{}{}
+						rf.resetElectionTimer()
 						rf.mu.Unlock()
 						return
 					}
@@ -181,8 +176,8 @@ func (rf *Raft) electLeader() {
 						rf.updateRoleWithoutLock(LEADER)
 						rf.votedFor = NONE
 						rf.reInitializedLeaderStateWithoutLock()
+						rf.resetElectionTimer()
 						rf.mu.Unlock()
-						rf.heartbeatCh <- struct{}{}
 						go rf.appendEntries()
 					} else {
 						rf.mu.Unlock()
@@ -190,8 +185,6 @@ func (rf *Raft) electLeader() {
 				}
 			}(peerIndex)
 		}
-	} else {
-		rf.mu.Unlock()
 	}
 }
 
