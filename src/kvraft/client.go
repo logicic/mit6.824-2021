@@ -13,8 +13,10 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader int
-	mu     sync.Mutex
+	leader        int
+	clientID      int64
+	nextCommandID int64
+	mu            sync.Mutex
 }
 
 func nrand() int64 {
@@ -29,6 +31,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leader = -1
+	ck.clientID = nrand()
+	DPrintf("ck.clientID:%d\n", ck.clientID)
+	ck.nextCommandID = 0
 	return ck
 }
 
@@ -50,25 +55,34 @@ func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 	args := GetArgs{
-		Key: key,
+		Key:       key,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
 	}
 	reply := GetReply{}
-	// if ck.leader != -1 {
-	// 	if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
-	// 		if reply.Err == OK {
-	// 			return reply.Value
-	// 		}
-	// 	}
-	// }
+	if ck.leader != -1 {
+		if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
+			DPrintf("[Client] <Get> mesg from server[%d] Err:%v\n", ck.leader, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				return reply.Value
+			}
+		}
+	}
 	for {
 		i := mrand.Intn(len(ck.servers))
 		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
+			DPrintf("[Client] <Get> mesg from server[%d] Err:%v\n", i, reply.Err)
 			if reply.Err == OK {
 				ck.leader = i
+				DPrintf("[Client] <Get> server[%d] is leader\n", i)
+				ck.nextCommandID++
 				return reply.Value
 			}
 			if reply.Err == ErrNoKey {
 				ck.leader = i
+				DPrintf("[Client] <Get> server[%d] is leader\n", i)
+				ck.nextCommandID++
 				return ""
 			}
 		}
@@ -91,25 +105,32 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
 	}
 	reply := PutAppendReply{}
-	// if ck.leader != -1 {
-	// 	DPrintf("first client send to server[%d] %v\n", ck.leader, args)
-	// 	if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
-	// 		if reply.Err == OK {
-	// 			return
-	// 		}
-	// 	}
-	// }
+	if ck.leader != -1 {
+		DPrintf("[Client] <PutAppend> first client send to server[%d] %v\n", ck.leader, args)
+		if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
+			DPrintf("[Client] <PutAppend> mesg from server[%d] Err:%v\n", ck.leader, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				return
+			}
+		}
+	}
 	for {
 		i := mrand.Intn(len(ck.servers))
-		DPrintf("client send to server[%d] %v\n", i, args)
+		DPrintf("[Client] <PutAppend> client send to server[%d] %v\n", i, args)
 		if ck.servers[i].Call("KVServer.PutAppend", &args, &reply) {
+			DPrintf("[Client] <PutAppend> mesg from server[%d] Err:%v\n", i, reply.Err)
 			if reply.Err == OK {
 				ck.leader = i
+				ck.nextCommandID++
+				DPrintf("[Client] <PutAppend> server[%d] is leader\n", i)
 				return
 			}
 		}
@@ -117,7 +138,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	DPrintf("????????%v\n", value)
 	ck.PutAppend(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {

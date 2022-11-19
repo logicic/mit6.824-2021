@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -23,9 +24,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Op    int
-	Key   string
-	Value string
+	Op        int
+	Key       string
+	Value     string
+	ClientID  int64
+	CommandID int64
 }
 
 type KVServer struct {
@@ -39,39 +42,79 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvStore map[string]string
+	// clientID 一对多 commandID， commandID 一对一 channel
+	clientCh      map[int64]map[int64]chan int64
+	lastCommandID map[int64]int64
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if _, isLeader := kv.rf.GetState(); !isLeader {
+	DPrintf("[Server] <Get> %d recv %v\n", kv.me, args)
+	command := Op{
+		Op:        0,
+		Key:       args.Key,
+		ClientID:  args.ClientID,
+		CommandID: args.CommandID,
+	}
+	_, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	DPrintf("%d GET kvStore:%v\n", kv.me, kv.kvStore)
+	kv.mu.Lock()
+
+	now := time.Now()
+	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, now)
+	clientSet, ok := kv.clientCh[args.ClientID]
+	if !ok {
+		kv.clientCh[args.ClientID] = make(map[int64]chan int64)
+		clientSet = kv.clientCh[args.ClientID]
+	}
+	lcID, ok := kv.lastCommandID[args.ClientID]
+	if !ok {
+		lcID = -1
+		kv.lastCommandID[args.ClientID] = -1
+	}
+	if lcID >= args.CommandID {
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+	commandCh, ok := clientSet[args.CommandID]
+	if !ok {
+		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
+		commandCh = kv.clientCh[args.ClientID][args.CommandID]
+	} else {
+		delete(kv.clientCh[args.ClientID], command.CommandID)
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+	kv.mu.Unlock()
+	select {
+	case applyCom := <-commandCh:
+		if applyCom != args.CommandID {
+			return
+		}
+	case <-time.After(ExecuteTimeout):
+		reply.Err = ErrTimeOut
+		return
+	}
+	reply.Err = OK
+	kv.mu.Lock()
+	delete(kv.clientCh[args.ClientID], command.CommandID)
 	value, ok := kv.kvStore[args.Key]
 	if !ok {
 		reply.Err = ErrNoKey
-		return
 	}
 	reply.Value = value
-	reply.Err = OK
-	return
-	// command := Op{
-	// 	Op:  0,
-	// 	Key: args.Key,
-	// }
-	// _, _, isLeader := kv.rf.Start(command)
-	// if !isLeader {
-	// 	reply.Err = ErrWrongLeader
-	// 	return
-	// }
+	kv.mu.Unlock()
+	// reply.Value = value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	DPrintf("%d recv %v\n", kv.me, args)
+	DPrintf("[Server] <PutAppend> %d recv %v\n", kv.me, args)
 	o := -1
 	if args.Op == "Put" {
 		o = 1
@@ -81,49 +124,107 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	command := Op{
-		Op:    o,
-		Key:   args.Key,
-		Value: args.Value,
+		Op:        o,
+		Key:       args.Key,
+		Value:     args.Value,
+		ClientID:  args.ClientID,
+		CommandID: args.CommandID,
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		DPrintf("[Server] <PutAppend> follower[%d]!", kv.me)
 		return
 	}
-	DPrintf("%d begin!\n", kv.me)
-	select {
-	case c := <-kv.applyCh:
-		op := c.Command.(Op)
-		DPrintf("%d get command %v\n", kv.me, op)
-		kv.mu.Lock()
-		if op.Op == 1 {
-			// Put
-			kv.kvStore[op.Key] = op.Value
-		} else if op.Op == 2 {
-			// Append
-			kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
-		}
-		DPrintf("%d kvStore:%v\n", kv.me, kv.kvStore)
+	DPrintf("[Server] <PutAppend> LOCK[%d]!", kv.me)
+	kv.mu.Lock()
+	now := time.Now()
+	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, args)
+	clientSet, ok := kv.clientCh[args.ClientID]
+	if !ok {
+		DPrintf("[Server] <PutAppend> leader[%d] register client[%d]!\n", kv.me, args.ClientID)
+		kv.clientCh[args.ClientID] = make(map[int64]chan int64)
+		clientSet = kv.clientCh[args.ClientID]
+	}
+	lcID, ok := kv.lastCommandID[args.ClientID]
+	if !ok {
+		lcID = -1
+		kv.lastCommandID[args.ClientID] = -1
+	}
+	if lcID >= args.CommandID {
 		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+	commandCh, ok := clientSet[args.CommandID]
+	if !ok {
+		DPrintf("[Server] <PutAppend> leader[%d] register client[%d] command[%d]!\n", kv.me, args.ClientID, args.CommandID)
+		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
+		commandCh = kv.clientCh[args.ClientID][args.CommandID]
+	} else {
+		delete(kv.clientCh[args.ClientID], command.CommandID)
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+
+	kv.mu.Unlock()
+	select {
+	case applyCom := <-commandCh:
+		if applyCom != args.CommandID {
+			return
+		}
+	case <-time.After(ExecuteTimeout):
+		reply.Err = ErrTimeOut
+		return
 	}
 	reply.Err = OK
-	DPrintf("%d finish!\n", kv.me)
+	kv.mu.Lock()
+	delete(kv.clientCh[args.ClientID], command.CommandID)
+	kv.mu.Unlock()
+	DPrintf("[Server] <PutAppend> %d finish! At:%v\n", kv.me, time.Since(now))
 }
 
-func (kv *KVServer) apply() {
+func (kv *KVServer) applier() {
 	for !kv.killed() {
 		select {
 		case c := <-kv.applyCh:
 			op := c.Command.(Op)
 			kv.mu.Lock()
+			lcID, ok := kv.lastCommandID[op.ClientID]
+			if !ok {
+				lcID = -1
+				kv.lastCommandID[op.ClientID] = -1
+			}
+			if lcID >= op.CommandID {
+				DPrintf("[Server] <applier> %d duplicate op[%d]:%v\n", kv.me, kv.lastCommandID, op)
+				continue
+			}
 			if op.Op == 1 {
 				// Put
 				kv.kvStore[op.Key] = op.Value
 			} else if op.Op == 2 {
 				// Append
 				kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
+			} else if op.Op == 0 {
+				// GET
+
 			}
+			kv.lastCommandID[op.ClientID] = op.CommandID
+			DPrintf("[Server] <applier> %d op:%v\n", kv.me, op)
+			cs, ok := kv.clientCh[op.ClientID]
+			if !ok {
+				kv.mu.Unlock()
+				continue
+			}
+			commandCh, ok := cs[op.CommandID]
+			if !ok {
+				kv.mu.Unlock()
+				continue
+			}
+			commandCh <- op.CommandID
 			kv.mu.Unlock()
+
 		}
 	}
 }
@@ -178,6 +279,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvStore = make(map[string]string)
 	// You may need initialization code here.
-
+	kv.clientCh = make(map[int64]map[int64]chan int64)
+	kv.lastCommandID = make(map[int64]int64)
+	go kv.applier()
 	return kv
 }
