@@ -228,6 +228,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = nextIndex
 	rf.matchIndex[rf.me] = index
 	DPrintf("%d temr[%d] append logs in start log[%d]:%v\n", rf.me, rf.currentTerm, index, rf.logEntries.at(index))
+	rf.appendEntries()
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -288,9 +289,9 @@ func (rf *Raft) ticker() {
 			// electionTimeout := rand.Intn(300)+MeanArrivalTime
 			electionTimeout := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(500) + 600
 			select {
+			case <-rf.heartbeatCh:
 			case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
 				rf.electLeader()
-			case <-rf.heartbeatCh:
 			}
 		} else {
 			rf.appendEntries()
@@ -324,7 +325,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 用来通知follower心跳包来了，reset选举定时器的计时
 	// 使用非阻塞channel，因为阻塞的话，有时候会死锁
 	// 这是因为我的定时器结构所导致的，没有使用time package的timer
-	rf.heartbeatCh = make(chan struct{}, 10)
+	rf.heartbeatCh = make(chan struct{}, 100)
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.votedFor = NONE
