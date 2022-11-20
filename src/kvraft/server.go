@@ -11,7 +11,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -58,13 +58,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
+		DPrintf("[Server] <Get> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 		reply.Err = ErrWrongLeader
 		return
 	}
+	DPrintf("[Server] <Get> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Lock()
-
-	now := time.Now()
-	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, now)
+	DPrintf("[Server] <Get> leader[%d] begin! At:%v\n", kv.me, args)
 	clientSet, ok := kv.clientCh[args.ClientID]
 	if !ok {
 		kv.clientCh[args.ClientID] = make(map[int64]chan int64)
@@ -75,9 +75,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		lcID = -1
 		kv.lastCommandID[args.ClientID] = -1
 	}
-	if lcID >= args.CommandID {
-		kv.mu.Unlock()
+	if lcID > args.CommandID {
 		reply.Err = OK
+		value, ok := kv.kvStore[args.Key]
+		if !ok {
+			reply.Err = ErrNoKey
+		}
+		reply.Value = value
+		kv.mu.Unlock()
+
+		return
+	}
+	if lcID == args.CommandID {
+		kv.mu.Unlock()
+		reply.Err = ErrDuplicateReq
 		return
 	}
 	commandCh, ok := clientSet[args.CommandID]
@@ -85,12 +96,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
 		commandCh = kv.clientCh[args.ClientID][args.CommandID]
 	} else {
-		delete(kv.clientCh[args.ClientID], command.CommandID)
+		// delete(kv.clientCh[args.ClientID], command.CommandID)
 		kv.mu.Unlock()
-		reply.Err = OK
+		reply.Err = ErrDuplicateReq
 		return
 	}
+	DPrintf("[Server] <Get> UNLOCK[%d]!", kv.me)
 	kv.mu.Unlock()
+	DPrintf("[Server] <Get> WAIT commandCH[%d]!", kv.me)
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != args.CommandID {
@@ -102,7 +115,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	reply.Err = OK
 	kv.mu.Lock()
-	delete(kv.clientCh[args.ClientID], command.CommandID)
+	// delete last CommandID not this one
+	delete(kv.clientCh[args.ClientID], command.CommandID-1)
 	value, ok := kv.kvStore[args.Key]
 	if !ok {
 		reply.Err = ErrNoKey
@@ -133,10 +147,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	_, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <PutAppend> follower[%d]!", kv.me)
+		DPrintf("[Server] <PutAppend> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 		return
 	}
-	DPrintf("[Server] <PutAppend> LOCK[%d]!", kv.me)
+	DPrintf("[Server] <PutAppend> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Lock()
 	now := time.Now()
 	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, args)
@@ -162,13 +176,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
 		commandCh = kv.clientCh[args.ClientID][args.CommandID]
 	} else {
-		delete(kv.clientCh[args.ClientID], command.CommandID)
+		// delete(kv.clientCh[args.ClientID], command.CommandID)
 		kv.mu.Unlock()
 		reply.Err = OK
 		return
 	}
-
+	DPrintf("[Server] <PutAppend> UNLOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Unlock()
+	DPrintf("[Server] <PutAppend> WAIT commandCH[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != args.CommandID {
@@ -180,9 +195,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	reply.Err = OK
 	kv.mu.Lock()
-	delete(kv.clientCh[args.ClientID], command.CommandID)
+	delete(kv.clientCh[args.ClientID], command.CommandID-1)
 	kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> %d finish! At:%v\n", kv.me, time.Since(now))
+	DPrintf("[Server] <PutAppend> %d finish! At:%v ClientID[%d] ComandID[%d]\n", kv.me, time.Since(now), args.ClientID, args.CommandID)
 }
 
 func (kv *KVServer) applier() {
@@ -198,20 +213,22 @@ func (kv *KVServer) applier() {
 			}
 			if lcID >= op.CommandID {
 				DPrintf("[Server] <applier> %d duplicate op[%d]:%v\n", kv.me, kv.lastCommandID, op)
+				kv.mu.Unlock()
 				continue
 			}
 			if op.Op == 1 {
 				// Put
 				kv.kvStore[op.Key] = op.Value
+				DPrintf("[Server] <applier> %d op:[PUT] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 			} else if op.Op == 2 {
 				// Append
 				kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
+				DPrintf("[Server] <applier> %d op:[APPEND] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 			} else if op.Op == 0 {
 				// GET
-
+				DPrintf("[Server] <applier> %d op:[GET] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 			}
 			kv.lastCommandID[op.ClientID] = op.CommandID
-			DPrintf("[Server] <applier> %d op:%v\n", kv.me, op)
 			cs, ok := kv.clientCh[op.ClientID]
 			if !ok {
 				kv.mu.Unlock()

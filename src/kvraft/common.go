@@ -3,12 +3,13 @@ package kvraft
 import "time"
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeOut     = "ErrTimeOut"
+	OK              = "OK"
+	ErrNoKey        = "ErrNoKey"
+	ErrWrongLeader  = "ErrWrongLeader"
+	ErrTimeOut      = "ErrTimeOut"
+	ErrDuplicateReq = "ErrDuplicateRequest"
 
-	ExecuteTimeout = 1 * time.Second
+	ExecuteTimeout = 2 * time.Second
 )
 
 type Err string
@@ -39,4 +40,11 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+func max(num1, num2 int64) int64 {
+	if num1 > num2 {
+		return num1
+	}
+	return num2
 }

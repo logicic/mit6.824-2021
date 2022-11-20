@@ -67,6 +67,10 @@ func (ck *Clerk) Get(key string) string {
 				ck.nextCommandID++
 				return reply.Value
 			}
+			if reply.Err == ErrDuplicateReq || reply.Err == ErrTimeOut {
+				ck.nextCommandID++
+				args.CommandID = ck.nextCommandID
+			}
 		}
 	}
 	for {
@@ -84,6 +88,10 @@ func (ck *Clerk) Get(key string) string {
 				DPrintf("[Client] <Get> server[%d] is leader\n", i)
 				ck.nextCommandID++
 				return ""
+			}
+			if reply.Err == ErrDuplicateReq || reply.Err == ErrTimeOut {
+				ck.nextCommandID++
+				args.CommandID = ck.nextCommandID
 			}
 		}
 	}
@@ -120,6 +128,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.nextCommandID++
 				return
 			}
+			if reply.Err == ErrTimeOut {
+				ck.nextCommandID++
+				args.CommandID = ck.nextCommandID
+			}
 		}
 	}
 	for {
@@ -132,6 +144,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.nextCommandID++
 				DPrintf("[Client] <PutAppend> server[%d] is leader\n", i)
 				return
+			}
+			if reply.Err == ErrTimeOut {
+				ck.leader = i
+				ck.nextCommandID++
+				args.CommandID = ck.nextCommandID
 			}
 		}
 	}
