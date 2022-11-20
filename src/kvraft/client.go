@@ -128,10 +128,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.nextCommandID++
 				return
 			}
-			if reply.Err == ErrTimeOut {
-				ck.nextCommandID++
-				args.CommandID = ck.nextCommandID
-			}
+			// if reply.Err == ErrTimeOut {
+			// 	ck.nextCommandID++
+			// 	args.CommandID = ck.nextCommandID
+			// }
 		}
 	}
 	for {
@@ -145,11 +145,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				DPrintf("[Client] <PutAppend> server[%d] is leader\n", i)
 				return
 			}
-			if reply.Err == ErrTimeOut {
-				ck.leader = i
-				ck.nextCommandID++
-				args.CommandID = ck.nextCommandID
-			}
+			// if reply.Err == ErrTimeOut {
+			// 	ck.leader = i
+			// 	ck.nextCommandID++
+			// 	args.CommandID = ck.nextCommandID
+			// }
 		}
 	}
 }

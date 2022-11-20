@@ -24,10 +24,12 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	ClientID  int64
 	CommandID int64
+	Term      int
 }
 
 type PutAppendReply struct {
-	Err Err
+	Err  Err
+	Term int
 }
 
 type GetArgs struct {
@@ -35,11 +37,13 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	ClientID  int64
 	CommandID int64
+	Term      int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+	Term  int
 }
 
 func max(num1, num2 int64) int64 {
