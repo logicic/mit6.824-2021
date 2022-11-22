@@ -22,7 +22,29 @@ import (
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-	rf.Snapshot(lastIncludedIndex, snapshot)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedTerm < rf.currentTerm {
+		return false
+	}
+	if rf.logEntries.getIndex0() >= lastIncludedIndex {
+		return false
+	}
+	rf.logEntries = makeEmptyLog()
+	rf.logEntries.setIndex0(lastIncludedIndex+1, lastIncludedTerm)
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logEntries)
+	data := w.Bytes()
+	if snapshot != nil || len(snapshot) > 0 {
+		rf.persister.SaveStateAndSnapshot(data, snapshot)
+	} else {
+		rf.persister.SaveRaftState(data)
+	}
 	DPrintf("%d CondInstallSnapshot!!\n", rf.me)
 	return true
 }
@@ -44,7 +66,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 	term := rf.logEntries.at(index).Term
-	snapshotSlice := rf.logEntries.slice(index + 1)
+	rf.logEntries.slice(index + 1)
 	rf.logEntries.setIndex0(index+1, term)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -53,37 +75,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	e.Encode(rf.logEntries)
 	data := w.Bytes()
 	if snapshot != nil || len(snapshot) > 0 {
-		temp := rf.persister.ReadSnapshot()
-		snapData := rf.readSnapshot(temp)
-		DPrintf("%d snapData:%v\n", rf.me, snapData)
-		if snapData != nil && len(snapData) > 0 {
-			snapshotIndex := len(snapData) - 1
-			if snapshotIndex < index {
-				snapData = append(snapData, snapshotSlice...)
-				w := new(bytes.Buffer)
-				e := labgob.NewEncoder(w)
-				e.Encode(snapData)
-				complateSnapshot := w.Bytes()
-				rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
-				DPrintf("%d SaveStateAndSnapshot1 data%d\n", rf.me, snapData)
-				return
-			} else {
-				rf.persister.SaveRaftState(data)
-				DPrintf("%d SaveRaftState1 data%d\n", rf.me, rf.logEntries)
-				return
-			}
-		} else {
-			w := new(bytes.Buffer)
-			e := labgob.NewEncoder(w)
-			e.Encode(snapshotSlice)
-			complateSnapshot := w.Bytes()
-			rf.persister.SaveStateAndSnapshot(data, complateSnapshot)
-			DPrintf("%d SaveStateAndSnapshot2 data%d\n", rf.me, snapData)
-		}
-		return
-		// rf.persister.SaveStateAndSnapshot(data, append(temp, snapshot...))
+		rf.persister.SaveStateAndSnapshot(data, snapshot)
+	} else {
+		rf.persister.SaveRaftState(data)
 	}
-	rf.persister.SaveRaftState(data)
 	DPrintf("%d SaveRaftState2 data%d\n", rf.me, rf.logEntries)
 }
 
@@ -146,55 +141,17 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if len(args.Data) <= 0 {
 		return
 	}
-
-	// 6. 解析传输过来的leader的snapshot数据
-	tmpLog := rf.readSnapshot(args.Data)
-	if tmpLog == nil {
-		return
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.Term,
+		SnapshotIndex: args.LastIncludedIndex,
 	}
-
-	// 7. 替换
-	rf.logEntries.modify(tmpLog[rf.logEntries.Index0:])
-	// 8. lastApplied的判断是用作同步appendEntry的时候，apply()function更新logEntry的同步问题
-	// 特别是最后一次循环的时候，因为发送channel会解锁，不一定会调度到condInstallSnapshot中，有可能
-	// 会整好先调度到下面的rf.snaping = false，再调度到appendEntry的处理函数，之前的各种问题就是因为这个
-	// channel的解锁后，调度到不同goroutine的问题，现在的结果是一个综合处理
-	if rf.logEntries.len() == rf.logEntries.getIndex0() || rf.logEntries.getIndex0() <= rf.lastApplied {
-		return
-	}
-	rf.snaping = true
-	DPrintf("%d recv snapshot[%d-%d]\n", rf.me, rf.logEntries.getIndex0(), rf.logEntries.lastIndex())
-	// 9. 循环同步
-	for _, log := range rf.logEntries.getEntriesOnlyread() {
-		if log.Index < rf.logEntries.getIndex0() || log.Index < rf.lastApplied {
-			continue
-		}
-		w := new(bytes.Buffer)
-		e := labgob.NewEncoder(w)
-		v := log.Command
-		e.Encode(v)
-
-		applyMsg := ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      w.Bytes(),
-			SnapshotTerm:  log.Term,
-			SnapshotIndex: log.Index,
-		}
-		rf.lastApplied = log.Index
-		DPrintf("%d applysnapshot1 %v apply: %v\n", rf.me, log.Command, applyMsg)
-		rf.mu.Unlock()
-		rf.applyCh <- applyMsg
-		rf.mu.Lock()
-		DPrintf("%d applysnapshot2 %v apply: %v\n", rf.me, log.Command, applyMsg)
-	}
-	// 10. 更新follower commitIndex
-	if args.LastIncludedIndex > rf.commitIndex {
-		rf.commitIndex = min(rf.logEntries.len(), args.LastIncludedIndex)
-		DPrintf("%d have updated commitIndex into %d\n", rf.me, rf.commitIndex)
-	}
-	// 11. 解逻辑锁
-	rf.snaping = false
-	// rf.commitIndex = args.LastIncludedIndex
+	// DPrintf("%d applysnapshot1 %v apply: %v\n", rf.me, log.Command, applyMsg)
+	rf.mu.Unlock()
+	rf.applyCh <- applyMsg
+	rf.mu.Lock()
+	// DPrintf("%d applysnapshot2 %v apply: %v\n", rf.me, log.Command, applyMsg)
 	return
 }
 

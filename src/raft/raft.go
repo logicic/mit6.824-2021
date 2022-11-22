@@ -175,7 +175,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logEntries = log
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.lastApplied = log.Index0 - 1
+		rf.lastApplied = max(log.Index0-1, rf.lastApplied)
 	}
 }
 

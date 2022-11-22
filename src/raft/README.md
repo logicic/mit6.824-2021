@@ -302,3 +302,42 @@ nextIndex reinitial是为了减少从follower变为leader时，nextIndex除了�
 - 每次snapshot，删除logEntry的值，把snapshot保存到persist中
 - 因为要删除logEntry的值，所以，需要在Entry本身保存全局index的值，而不能只是使用array来标记它与原本的index
 - InstallSnapshot，是follower向leader询问snapshot，leader会把自己的snapshot发给follower
+
+
+在2D中，snapshot发送的最新的commited logEntry已经够用了。
+在3A中，snapshot需要发送的是所有的kv的interface打包。
+即，raft中log state以及persist中保留还 未达到长度的snapShotSize，既有commited的数据也有未commited的数据
+在snapshot中保留的是全部的当前最新的 已commited的全部数据，但是存储什么的逻辑应该是在raft外层做，
+所以raft内层的逻辑不应该对其进行加工了。
+
+2D中的具体操作：
+所有的server都会检查apply后的commited的长度，是否达到上限
+达到上限的server，会把最新已commited的log给剪切，在raft state和persist中只保留到未commited的全部数据
+并且把传进到snapshot function的[]bytes给保存到persiste.snapshot当中。
+此时，某些follower会落后于leader，而leader的log 数据已经snapshot了，在raft.log中只有未commited，
+不是某些落后follower想要的数据，在代码中体现为，nextIndex比leader的能索引到的logIndex小，那么会触发
+一个snapshot rpc的请求，发送到这个follower上，告诉follower当前的最新commited log，在这个之前以及这一个
+都不需要在等了（已经得到绝大多数的认可了，commited），剪切follower的log（尽管他没得剪切，只能说是移除），更新
+snapshot到最新的commited log，并触发applyCh到上层服务，告诉上层服务，最新的数据已经更新到这个了。上层服务也有一个conInstallSnapshot的回调
+函数，执行上层逻辑后，补充raft层的逻辑操作。此时应该执行persist持久化当前的更改。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
