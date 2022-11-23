@@ -62,7 +62,7 @@ func (ck *Clerk) Get(key string) string {
 	reply := GetReply{}
 	if ck.leader != -1 {
 		if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
-			DPrintf("[Client] <Get> mesg from server[%d] Err:%v\n", ck.leader, reply.Err)
+			DPrintf("[Client] <Get> client[%d] first mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
 				ck.nextCommandID++
 				return reply.Value
@@ -76,16 +76,16 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		i := mrand.Intn(len(ck.servers))
 		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
-			DPrintf("[Client] <Get> mesg from server[%d] Err:%v\n", i, reply.Err)
+			DPrintf("[Client] <Get> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, i, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
 				ck.leader = i
-				DPrintf("[Client] <Get> server[%d] is leader\n", i)
+				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, i)
 				ck.nextCommandID++
 				return reply.Value
 			}
 			if reply.Err == ErrNoKey {
 				ck.leader = i
-				DPrintf("[Client] <Get> server[%d] is leader\n", i)
+				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, i)
 				ck.nextCommandID++
 				return ""
 			}
@@ -121,35 +121,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	reply := PutAppendReply{}
 	if ck.leader != -1 {
-		DPrintf("[Client] <PutAppend> first client send to server[%d] %v\n", ck.leader, args)
+		DPrintf("[Client] <PutAppend> client[%d] first client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
 		if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("[Client] <PutAppend> mesg from server[%d] Err:%v\n", ck.leader, reply.Err)
+			DPrintf("[Client] <PutAppend> client[%d] first mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
 				ck.nextCommandID++
 				return
 			}
-			// if reply.Err == ErrTimeOut {
-			// 	ck.nextCommandID++
-			// 	args.CommandID = ck.nextCommandID
-			// }
 		}
 	}
 	for {
 		i := mrand.Intn(len(ck.servers))
-		DPrintf("[Client] <PutAppend> client send to server[%d] %v\n", i, args)
+		DPrintf("[Client] <PutAppend> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, i, ck.nextCommandID, args)
 		if ck.servers[i].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("[Client] <PutAppend> mesg from server[%d] Err:%v\n", i, reply.Err)
+			DPrintf("[Client] <PutAppend> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, i, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
 				ck.leader = i
 				ck.nextCommandID++
-				DPrintf("[Client] <PutAppend> server[%d] is leader\n", i)
+				DPrintf("[Client] <PutAppend> client[%d] server[%d] is leader\n", ck.clientID, i)
 				return
 			}
-			// if reply.Err == ErrTimeOut {
-			// 	ck.leader = i
-			// 	ck.nextCommandID++
-			// 	args.CommandID = ck.nextCommandID
-			// }
 		}
 	}
 }
