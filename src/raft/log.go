@@ -53,6 +53,10 @@ func (l *Log) getIndex0() int {
 	return l.Index0
 }
 
+func (l *Log) getTerm0() int {
+	return l.Term0
+}
+
 func (l *Log) append(logItems ...Entry) {
 	l.Entries = append(l.Entries, logItems...)
 }

@@ -24,9 +24,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if lastIncludedTerm < rf.currentTerm {
-		return false
-	}
 	if rf.logEntries.getIndex0() >= lastIncludedIndex {
 		return false
 	}
@@ -45,7 +42,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	} else {
 		rf.persister.SaveRaftState(data)
 	}
-	DPrintf("%d CondInstallSnapshot!!\n", rf.me)
+	DPrintf("%d CondInstallSnapshot!!commitedId:%d lastapplied:%d log:%v\n", rf.me, rf.commitIndex, rf.lastApplied, rf.logEntries)
 	return true
 }
 
@@ -144,7 +141,7 @@ func (rf *Raft) Installsnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	applyMsg := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
-		SnapshotTerm:  args.Term,
+		SnapshotTerm:  args.LastIncludeTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
 	// DPrintf("%d applysnapshot1 %v apply: %v\n", rf.me, log.Command, applyMsg)
@@ -181,6 +178,7 @@ func (rf *Raft) doSnapshot(peer int) {
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
 		LastIncludedIndex: logIndex0 - 1,
+		LastIncludeTerm:   rf.logEntries.getTerm0(),
 		Data:              snapDataByte,
 	}
 	reply := &InstallSnapshotReply{}
@@ -200,4 +198,12 @@ func (rf *Raft) doSnapshot(peer int) {
 		DPrintf("snapshot %d append nextIndex[%d]:%v\n", rf.me, peer, rf.nextIndex)
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) RaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) ReadSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
 }
