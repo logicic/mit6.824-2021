@@ -3,7 +3,6 @@ package kvraft
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -251,7 +250,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
-		log.Printf("Iteration %v\n", i)
+		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -261,11 +260,9 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			}()
 			last := "" // only used when not randomkeys
 			if !randomkeys {
-				log.Printf("CAO!!! %v\n", last)
 				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
 			}
 			for atomic.LoadInt32(&done_clients) == 0 {
-				DPrintf("last:%s\n", last)
 				var key string
 				if randomkeys {
 					key = strconv.Itoa(rand.Intn(nclients))
@@ -344,7 +341,6 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			key := strconv.Itoa(i)
 			// log.Printf("Check %v for client %d\n", j, i)
 			v := Get(cfg, ck, key, opLog, 0)
-			DPrintf("cao:%v\n", v)
 			if !randomkeys {
 				checkClntAppends(t, i, v, j)
 			}
