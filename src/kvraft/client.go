@@ -3,6 +3,7 @@ package kvraft
 import (
 	"math/big"
 	"sync"
+	"time"
 
 	"crypto/rand"
 	mrand "math/rand"
@@ -30,7 +31,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.leader = -1
+	ck.leader = mrand.Intn(len(ck.servers))
 	ck.clientID = nrand()
 	DPrintf("ck.clientID:%d\n", ck.clientID)
 	ck.nextCommandID = 0
@@ -60,42 +61,29 @@ func (ck *Clerk) Get(key string) string {
 		CommandID: ck.nextCommandID,
 	}
 	reply := GetReply{}
-	if ck.leader != -1 {
-		if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
-			DPrintf("[Client] <Get> client[%d] first mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
-			if reply.Err == OK {
-				ck.nextCommandID++
-				return reply.Value
-			}
-			if reply.Err == ErrDuplicateReq || reply.Err == ErrTimeOut {
-				ck.nextCommandID++
-				args.CommandID = ck.nextCommandID
-			}
-		}
-	}
 	for {
-		i := mrand.Intn(len(ck.servers))
-		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
-			DPrintf("[Client] <Get> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, i, ck.nextCommandID, reply.Err)
+		if ck.servers[ck.leader].Call("KVServer.Get", &args, &reply) {
+			DPrintf("[Client] <Get> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
-				ck.leader = i
-				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, i)
+				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				ck.nextCommandID++
 				return reply.Value
 			}
 			if reply.Err == ErrNoKey {
-				ck.leader = i
-				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, i)
+				DPrintf("[Client] <Get> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				ck.nextCommandID++
 				return ""
 			}
-			if reply.Err == ErrDuplicateReq || reply.Err == ErrTimeOut {
-				ck.nextCommandID++
-				args.CommandID = ck.nextCommandID
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <Get> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
 			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
 		}
+		time.Sleep(100 * time.Microsecond)
 	}
-	return ""
 }
 
 //
@@ -120,28 +108,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		CommandID: ck.nextCommandID,
 	}
 	reply := PutAppendReply{}
-	if ck.leader != -1 {
-		DPrintf("[Client] <PutAppend> client[%d] first client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
-		if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("[Client] <PutAppend> client[%d] first mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
-			if reply.Err == OK {
-				ck.nextCommandID++
-				return
-			}
-		}
-	}
 	for {
-		i := mrand.Intn(len(ck.servers))
-		DPrintf("[Client] <PutAppend> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, i, ck.nextCommandID, args)
-		if ck.servers[i].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("[Client] <PutAppend> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, i, ck.nextCommandID, reply.Err)
+		DPrintf("[Client] <PutAppend> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
+		if ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply) {
+			DPrintf("[Client] <PutAppend> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
 			if reply.Err == OK {
-				ck.leader = i
 				ck.nextCommandID++
-				DPrintf("[Client] <PutAppend> client[%d] server[%d] is leader\n", ck.clientID, i)
+				DPrintf("[Client] <PutAppend> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				return
 			}
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
 		}
+		time.Sleep(100 * time.Microsecond)
 	}
 }
 

@@ -63,29 +63,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientID:  args.ClientID,
 		CommandID: args.CommandID,
 	}
-	term, isLeader1 := kv.rf.GetState()
-	command.Term = term
-	_, term, isLeader2 := kv.rf.Start(command)
-	if !isLeader1 || !isLeader2 {
-		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <Get> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
-		return
-	}
-
-	DPrintf("[Server] <Get> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Lock()
-	DPrintf("[Server] <Get> leader[%d] begin! At:%v\n", kv.me, args)
-	clientSet, ok := kv.clientCh[args.ClientID]
-	if !ok {
-		kv.clientCh[args.ClientID] = make(map[int64]chan int64)
-		clientSet = kv.clientCh[args.ClientID]
-	}
-	lcID, ok := kv.lastCommandID[args.ClientID]
-	if !ok {
-		lcID = -1
-		kv.lastCommandID[args.ClientID] = -1
-	}
-	if lcID > args.CommandID {
+	// 1. check duplicate and out-date data
+	if !kv.checkCommandIDWithoutLOCK(command) {
 		reply.Err = OK
 		value, ok := kv.kvStore[args.Key]
 		if !ok {
@@ -96,15 +76,29 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		return
 	}
-	commandCh, ok := clientSet[args.CommandID]
-	if !ok {
-		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
-		commandCh = kv.clientCh[args.ClientID][args.CommandID]
+	// 2. check leader role and append logEntry
+	term, isLeader1 := kv.rf.GetState()
+	command.Term = term
+	_, term, isLeader2 := kv.rf.Start(command)
+	if !isLeader1 || !isLeader2 {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		DPrintf("[Server] <Get> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+		return
 	}
+
+	DPrintf("[Server] <Get> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+
+	DPrintf("[Server] <Get> leader[%d] begin! At:%v\n", kv.me, args)
+
+	// 3. get command channel
+	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	DPrintf("[Server] <Get> UNLOCK[%d]!", kv.me)
 	kv.mu.Unlock()
 	DPrintf("[Server] <Get> WAIT commandCH[%d]!", kv.me)
 	reply.Err = OK
+
+	// 4. wait the command data from channel
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != args.CommandID {
@@ -113,8 +107,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		kv.mu.Lock()
 		// delete last CommandID not this one
+		close(kv.clientCh[args.ClientID][command.CommandID])
 		delete(kv.clientCh[args.ClientID], command.CommandID)
-		delete(kv.clientCh[args.ClientID], command.CommandID-1)
+		// delete(kv.clientCh[args.ClientID], command.CommandID-1)
 		value, ok := kv.kvStore[args.Key]
 		if !ok {
 			reply.Err = ErrNoKey
@@ -122,11 +117,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Value = value
 		DPrintf("%d kv:%v\n", kv.me, kv.kvStore)
 		kv.mu.Unlock()
+		return
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
+		kv.mu.Lock()
+		if kv.clientCh[args.ClientID][command.CommandID] != nil {
+			close(kv.clientCh[args.ClientID][command.CommandID])
+			delete(kv.clientCh[args.ClientID], command.CommandID)
+		}
+		kv.mu.Unlock()
 	}
-
-	// reply.Value = value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -147,64 +147,128 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientID:  args.ClientID,
 		CommandID: args.CommandID,
 	}
+	kv.mu.Lock()
+	// 1. check duplicate and out-date data
+	if !kv.checkCommandIDWithoutLOCK(command) {
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+	// 2. check leader role and append logEntry
 	term, isLeader1 := kv.rf.GetState()
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
 		reply.Err = ErrWrongLeader
 		DPrintf("[Server] <PutAppend> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+		kv.mu.Unlock()
 		return
 	}
-	command.Term = term
 	DPrintf("[Server] <PutAppend> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
-	kv.mu.Lock()
 	now := time.Now()
 	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, args)
-	clientSet, ok := kv.clientCh[args.ClientID]
-	if !ok {
-		DPrintf("[Server] <PutAppend> leader[%d] register client[%d]!\n", kv.me, args.ClientID)
-		kv.clientCh[args.ClientID] = make(map[int64]chan int64)
-		clientSet = kv.clientCh[args.ClientID]
-	}
-	lcID, ok := kv.lastCommandID[args.ClientID]
-	if !ok {
-		lcID = -1
-		kv.lastCommandID[args.ClientID] = -1
-	}
-	if lcID > args.CommandID {
-		kv.mu.Unlock()
-		reply.Err = OK
-		return
-	}
-	commandCh, ok := clientSet[args.CommandID]
-	if !ok {
-		DPrintf("[Server] <PutAppend> term[%d] leader[%d] register client[%d] command[%d]!\n", command.Term, kv.me, args.ClientID, args.CommandID)
-		kv.clientCh[args.ClientID][args.CommandID] = make(chan int64)
-		commandCh = kv.clientCh[args.ClientID][args.CommandID]
-	}
+	// 3. get command channel
+	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	DPrintf("[Server] <PutAppend> UNLOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Unlock()
 	DPrintf("[Server] <PutAppend> WAIT commandCH[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	reply.Err = OK
+	// 4. wait the command data from channel
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != command.CommandID {
 			return
 		}
-		kv.mu.Lock()
-		delete(kv.clientCh[args.ClientID], command.CommandID)
-		delete(kv.clientCh[args.ClientID], command.CommandID-1)
-		kv.mu.Unlock()
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
 	}
-	// if kv.clientCh[args.ClientID][command.CommandID-1] != nil {
-	// 	close(kv.clientCh[args.ClientID][command.CommandID-1])
-	// 	delete(kv.clientCh[args.ClientID], command.CommandID-1)
-	// }
+	kv.mu.Lock()
+	if kv.clientCh[args.ClientID][command.CommandID] != nil {
+		close(kv.clientCh[args.ClientID][command.CommandID])
+		delete(kv.clientCh[args.ClientID], command.CommandID)
+	}
+	kv.mu.Unlock()
 	DPrintf("[Server] <PutAppend> %d finish! At:%v ClientID[%d] ComandID[%d]\n", kv.me, time.Since(now), args.ClientID, args.CommandID)
 }
 
+func (kv *KVServer) updateKVWithoutLOCK(op Op) {
+	if op.Op == 1 {
+		// Put
+		kv.kvStore[op.Key] = op.Value
+		DPrintf("[Server] <applier> %d op:[PUT] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+	} else if op.Op == 2 {
+		// Append
+		kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
+		DPrintf("[Server] <applier> %d op:[APPEND] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+	} else if op.Op == 0 {
+		// GET
+		DPrintf("[Server] <applier> %d op:[GET] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+	}
+	kv.lastCommandID[op.ClientID] = op.CommandID
+}
+
+func (kv *KVServer) makeCommandChanWithoutLOCK(op Op) chan int64 {
+	clientSet, ok := kv.clientCh[op.ClientID]
+	if !ok {
+		kv.clientCh[op.ClientID] = make(map[int64]chan int64)
+		clientSet = kv.clientCh[op.ClientID]
+	}
+	commandCh, ok := clientSet[op.CommandID]
+	if !ok {
+		kv.clientCh[op.ClientID][op.CommandID] = make(chan int64)
+		commandCh = kv.clientCh[op.ClientID][op.CommandID]
+	}
+	return commandCh
+}
+
+func (kv *KVServer) getCommandChanWithoutLOCK(op Op) chan int64 {
+	clientSet, ok := kv.clientCh[op.ClientID]
+	if !ok {
+		return nil
+	}
+	commandCh, ok := clientSet[op.CommandID]
+	if !ok {
+		return nil
+	}
+	return commandCh
+}
+
+func (kv *KVServer) checkCommandIDWithoutLOCK(op Op) bool {
+	lcID, ok := kv.lastCommandID[op.ClientID]
+	if !ok {
+		lcID = -1
+		kv.lastCommandID[op.ClientID] = -1
+	}
+	if lcID >= op.CommandID {
+		return false
+	}
+	return true
+}
+
+func (kv *KVServer) snapshotWithoutLOCK(commandIndex int) {
+	if kv.rf.RaftStateSize() > kv.maxraftstate && kv.maxraftstate > -1 {
+		data := snapshotData{
+			KvStore:       kv.kvStore,
+			LastCommandID: kv.lastCommandID,
+		}
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(data)
+		kv.rf.Snapshot(commandIndex, w.Bytes())
+	}
+}
+func (kv *KVServer) readsnapshotWithoutLOCK(snapshot []byte) {
+	if len(snapshot) > 0 {
+		r := bytes.NewBuffer(snapshot)
+		d := labgob.NewDecoder(r)
+		var data snapshotData
+		if d.Decode(&data) != nil {
+			log.Fatalf("decode error\n")
+		}
+		kv.kvStore = data.KvStore
+		kv.lastCommandID = data.LastCommandID
+	}
+}
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		select {
@@ -213,17 +277,8 @@ func (kv *KVServer) applier() {
 
 				if kv.rf.CondInstallSnapshot(m.SnapshotTerm,
 					m.SnapshotIndex, m.Snapshot) {
-					r := bytes.NewBuffer(m.Snapshot)
-					d := labgob.NewDecoder(r)
-					var data snapshotData
-					if d.Decode(&data) != nil {
-						log.Fatalf("decode error\n")
-					}
-
 					kv.mu.Lock()
-					kv.kvStore = data.KvStore
-					kv.lastCommandID = data.LastCommandID
-					// fmt.Printf("%d map : %v\n", kv.me, kv.kvStore)
+					kv.readsnapshotWithoutLOCK(m.Snapshot)
 					kv.mu.Unlock()
 				}
 
@@ -231,59 +286,29 @@ func (kv *KVServer) applier() {
 				DPrintf("%d applyCh:%v\n", kv.me, m)
 				op := m.Command.(Op)
 				kv.mu.Lock()
-				lcID, ok := kv.lastCommandID[op.ClientID]
-				if !ok {
-					lcID = -1
-					kv.lastCommandID[op.ClientID] = -1
-				}
-				if lcID < op.CommandID {
-					if op.Op == 1 {
-						// Put
-						kv.kvStore[op.Key] = op.Value
-						DPrintf("[Server] <applier> %d op:[PUT] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-					} else if op.Op == 2 {
-						// Append
-						kv.kvStore[op.Key] = kv.kvStore[op.Key] + op.Value
-						DPrintf("[Server] <applier> %d op:[APPEND] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-					} else if op.Op == 0 {
-						// GET
-						DPrintf("[Server] <applier> %d op:[GET] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+				// 1. check commandID
+				// 2. only the new one can update keyvalue db
+				if kv.checkCommandIDWithoutLOCK(op) {
+					// 2.1 update k-v
+					kv.updateKVWithoutLOCK(op)
+					// 2.2 get command channel
+					commandCh := kv.getCommandChanWithoutLOCK(op)
+					if commandCh != nil {
+						kv.mu.Unlock()
+						DPrintf("[Server] <applier> %d enter rf.GetState clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+						// 2.3 only leader role can send data to channel
+						if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
+							DPrintf("[Server] <applier> %d sendback1 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+							commandCh <- op.CommandID
+							DPrintf("[Server] <applier> %d sendback2 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+						}
+						kv.mu.Lock()
 					}
-					kv.lastCommandID[op.ClientID] = op.CommandID
 				}
 
-				if kv.rf.RaftStateSize() > kv.maxraftstate && kv.maxraftstate > -1 {
-					data := snapshotData{
-						KvStore:       kv.kvStore,
-						LastCommandID: kv.lastCommandID,
-					}
-					w := new(bytes.Buffer)
-					e := labgob.NewEncoder(w)
-					// v := kv.kvStore
-					e.Encode(data)
-					kv.mu.Unlock()
-					kv.rf.Snapshot(m.CommandIndex, w.Bytes())
-					kv.mu.Lock()
-				}
-				cs, ok1 := kv.clientCh[op.ClientID]
-				if !ok1 {
-					DPrintf("[Server] <applier> %d no clientCH clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-					kv.mu.Unlock()
-					continue
-				}
-				commandCh, ok2 := cs[op.CommandID]
-				if !ok2 {
-					DPrintf("[Server] <applier> %d no commandCH clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-					kv.mu.Unlock()
-					continue
-				}
+				// 3. snapshot
+				kv.snapshotWithoutLOCK(m.CommandIndex)
 				kv.mu.Unlock()
-				DPrintf("[Server] <applier> %d enter rf.GetState clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-				if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
-					DPrintf("[Server] <applier> %d sendback1 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-					commandCh <- op.CommandID
-					DPrintf("[Server] <applier> %d sendback2 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-				}
 			}
 		}
 	}
@@ -341,20 +366,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clientCh = make(map[int64]map[int64]chan int64)
 	kv.lastCommandID = make(map[int64]int64)
 	snapshot := kv.rf.ReadSnapshot()
-	if len(snapshot) > 0 {
-		r := bytes.NewBuffer(snapshot)
-		d := labgob.NewDecoder(r)
-		var data snapshotData
-		if d.Decode(&data) != nil {
-			log.Fatalf("decode error\n")
-		}
-		kv.mu.Lock()
-		kv.kvStore = data.KvStore
-		kv.lastCommandID = data.LastCommandID
-		kv.mu.Unlock()
-		// fmt.Printf("%d map : %v\n", kv.me, kv.kvStore)
-	}
-
+	kv.readsnapshotWithoutLOCK(snapshot)
 	go kv.applier()
 	return kv
 }
