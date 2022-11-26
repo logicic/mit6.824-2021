@@ -87,10 +87,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	DPrintf("[Server] <Get> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
-
-	DPrintf("[Server] <Get> leader[%d] begin! At:%v\n", kv.me, args)
-
+	DPrintf("[Server] <Get> begin![%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	DPrintf("[Server] <Get> UNLOCK[%d]!", kv.me)
@@ -102,14 +99,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != args.CommandID {
-			DPrintf("%d !!!!!!!!!!!!!!!!!\n", kv.me)
 			return
 		}
 		kv.mu.Lock()
-		// delete last CommandID not this one
-		close(kv.clientCh[args.ClientID][command.CommandID])
-		delete(kv.clientCh[args.ClientID], command.CommandID)
-		// delete(kv.clientCh[args.ClientID], command.CommandID-1)
+		kv.deleteCommandChanWithoutLOCK(command)
 		value, ok := kv.kvStore[args.Key]
 		if !ok {
 			reply.Err = ErrNoKey
@@ -121,10 +114,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
 		kv.mu.Lock()
-		if kv.clientCh[args.ClientID][command.CommandID] != nil {
-			close(kv.clientCh[args.ClientID][command.CommandID])
-			delete(kv.clientCh[args.ClientID], command.CommandID)
-		}
+		kv.deleteCommandChanWithoutLOCK(command)
 		kv.mu.Unlock()
 	}
 }
@@ -164,9 +154,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	DPrintf("[Server] <PutAppend> LOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
-	now := time.Now()
-	DPrintf("[Server] <PutAppend> leader[%d] begin! At:%v\n", kv.me, args)
+	DPrintf("[Server] <PutAppend> begin![%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	DPrintf("[Server] <PutAppend> UNLOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
@@ -183,12 +171,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrTimeOut
 	}
 	kv.mu.Lock()
-	if kv.clientCh[args.ClientID][command.CommandID] != nil {
-		close(kv.clientCh[args.ClientID][command.CommandID])
-		delete(kv.clientCh[args.ClientID], command.CommandID)
-	}
+	kv.deleteCommandChanWithoutLOCK(command)
 	kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> %d finish! At:%v ClientID[%d] ComandID[%d]\n", kv.me, time.Since(now), args.ClientID, args.CommandID)
+	DPrintf("[Server] <PutAppend> %d finish! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 }
 
 func (kv *KVServer) updateKVWithoutLOCK(op Op) {
@@ -231,6 +216,13 @@ func (kv *KVServer) getCommandChanWithoutLOCK(op Op) chan int64 {
 		return nil
 	}
 	return commandCh
+}
+
+func (kv *KVServer) deleteCommandChanWithoutLOCK(op Op) {
+	if kv.clientCh[op.ClientID][op.CommandID] != nil {
+		close(kv.clientCh[op.ClientID][op.CommandID])
+		delete(kv.clientCh[op.ClientID], op.CommandID)
+	}
 }
 
 func (kv *KVServer) checkCommandIDWithoutLOCK(op Op) bool {
@@ -292,9 +284,11 @@ func (kv *KVServer) applier() {
 					// 2.1 update k-v
 					kv.updateKVWithoutLOCK(op)
 					// 2.2 get command channel
+					// 3. snapshot
+					kv.snapshotWithoutLOCK(m.CommandIndex)
 					commandCh := kv.getCommandChanWithoutLOCK(op)
+					kv.mu.Unlock()
 					if commandCh != nil {
-						kv.mu.Unlock()
 						DPrintf("[Server] <applier> %d enter rf.GetState clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 						// 2.3 only leader role can send data to channel
 						if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
@@ -302,13 +296,10 @@ func (kv *KVServer) applier() {
 							commandCh <- op.CommandID
 							DPrintf("[Server] <applier> %d sendback2 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 						}
-						kv.mu.Lock()
 					}
+				} else {
+					kv.mu.Unlock()
 				}
-
-				// 3. snapshot
-				kv.snapshotWithoutLOCK(m.CommandIndex)
-				kv.mu.Unlock()
 			}
 		}
 	}

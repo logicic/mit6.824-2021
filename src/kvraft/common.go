@@ -9,7 +9,7 @@ const (
 	ErrTimeOut      = "ErrTimeOut"
 	ErrDuplicateReq = "ErrDuplicateRequest"
 
-	ExecuteTimeout = 2 * time.Second
+	ExecuteTimeout = 1 * time.Second
 )
 
 type Err string
