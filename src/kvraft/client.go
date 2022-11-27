@@ -77,12 +77,14 @@ func (ck *Clerk) Get(key string) string {
 			if reply.Err == ErrWrongLeader {
 				ck.leader = mrand.Intn(len(ck.servers))
 				DPrintf("[Client] <Get> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
 			}
 		} else {
 			ck.leader = mrand.Intn(len(ck.servers))
 			DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Microsecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
 
@@ -120,12 +122,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			if reply.Err == ErrWrongLeader {
 				ck.leader = mrand.Intn(len(ck.servers))
 				DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
 			}
 		} else {
 			ck.leader = mrand.Intn(len(ck.servers))
 			DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Microsecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
 

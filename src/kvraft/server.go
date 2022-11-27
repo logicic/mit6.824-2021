@@ -99,10 +99,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != args.CommandID {
-			return
+			// return
+			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, args.CommandID)
 		}
 		kv.mu.Lock()
-		kv.deleteCommandChanWithoutLOCK(command)
+		// kv.deleteCommandChanWithoutLOCK(command)
 		value, ok := kv.kvStore[args.Key]
 		if !ok {
 			reply.Err = ErrNoKey
@@ -113,9 +114,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
-		kv.mu.Lock()
-		kv.deleteCommandChanWithoutLOCK(command)
-		kv.mu.Unlock()
+		// kv.mu.Lock()
+		// kv.deleteCommandChanWithoutLOCK(command)
+		// kv.mu.Unlock()
 	}
 }
 
@@ -165,14 +166,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case applyCom := <-commandCh:
 		if applyCom != command.CommandID {
-			return
+			// return
+			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, args.CommandID)
 		}
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
 	}
-	kv.mu.Lock()
-	kv.deleteCommandChanWithoutLOCK(command)
-	kv.mu.Unlock()
+	// kv.mu.Lock()
+	// kv.deleteCommandChanWithoutLOCK(command)
+	// kv.mu.Unlock()
 	DPrintf("[Server] <PutAppend> %d finish! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 }
 
@@ -293,9 +295,16 @@ func (kv *KVServer) applier() {
 						// 2.3 only leader role can send data to channel
 						if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
 							DPrintf("[Server] <applier> %d sendback1 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
-							commandCh <- op.CommandID
+							// commandCh <- op.CommandID
+							select {
+							case commandCh <- op.CommandID:
+							case <-time.After(1 * time.Second):
+							}
 							DPrintf("[Server] <applier> %d sendback2 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 						}
+						kv.mu.Lock()
+						kv.deleteCommandChanWithoutLOCK(op)
+						kv.mu.Unlock()
 					}
 				} else {
 					kv.mu.Unlock()
