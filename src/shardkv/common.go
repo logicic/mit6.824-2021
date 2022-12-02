@@ -1,7 +1,7 @@
 package shardkv
 
 import (
-	"fmt"
+	// "fmt"
 	"time"
 )
 
@@ -47,6 +47,7 @@ const (
 	ConfigRunning  = 11
 	ConfigUpdate   = 12
 	ConfigUpdating = 13
+	ConfigFollower = 14
 
 	ShardNormal  = 0
 	ShardWaiting = 15
@@ -147,7 +148,7 @@ func (db shardKvStore) checkStatus(status int) bool {
 func (db shardKvStore) isNormal() bool {
 	ok := true
 	for shard := range db {
-		fmt.Printf("db[%d].Status:%v\n", shard, db[shard].Status)
+		// fmt.Printf("db[%d].Status:%v\n", shard, db[shard].Status)
 		if db[shard].Status != ShardNormal {
 			ok = false
 		}

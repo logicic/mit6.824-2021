@@ -114,8 +114,8 @@ func (ck *Clerk) Get(key string) string {
 					}
 
 					if reply.Err == ErrSendAgain {
-						ck.nextCommandID++
-						args.CommandID = ck.nextCommandID
+						// ck.nextCommandID++
+						// args.CommandID = ck.nextCommandID
 						break
 					}
 				}
@@ -172,8 +172,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 
 				if reply.Err == ErrSendAgain {
-					ck.nextCommandID++
-					args.CommandID = ck.nextCommandID
+					// ck.nextCommandID++
+					// args.CommandID = ck.nextCommandID
 					break
 				}
 			}

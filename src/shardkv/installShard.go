@@ -39,6 +39,18 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 		if !isLeader1 {
 			return
 		}
+		ok := false
+		kv.mu.Lock()
+		for _, sh := range kv.deletingShard {
+			if sh == shardNum {
+				ok = true
+				break
+			}
+		}
+		kv.mu.Unlock()
+		if !ok {
+			return
+		}
 		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, kv.config, time.Now())
 		DPrintf("[Client] <SendShard> client[%d] send to gid[%d] try shard:%d db:%v commandID:%d\n", args.ClientID, gid, shardNum, args.DB, args.CommandID)
 		if servers, ok := config.Groups[gid]; ok {
@@ -79,6 +91,13 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 	}
 
 	kv.mu.Lock()
+	term, isLeader1 := kv.rf.GetState()
+	if !isLeader1 {
+		reply.Err = ErrWrongLeader
+		DPrintf("[Server] <InstallShard> gid:%d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
+		kv.mu.Unlock()
+		return
+	}
 	if args.Config.Num <= kv.config.Num {
 		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
 		kv.mu.Unlock()
@@ -93,13 +112,7 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 		return
 	}
 	// 2. check leader role and append logEntry
-	term, isLeader1 := kv.rf.GetState()
-	if !isLeader1 {
-		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <InstallShard> gid:%d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
-		kv.mu.Unlock()
-		return
-	}
+
 	if kv.shardKvStore.status(args.ShardNum) != ShardWaiting {
 		reply.Err = ErrShardWaiting
 		fmt.Printf("[Server] <InstallShard> ErrShardWaiting gid:%d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.824/labgob"
@@ -50,6 +51,7 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	dead          int32 // set by Kill()
 	sm            *shardctrler.Clerk
 	config        shardctrler.Config
 	shardTasks    map[int]struct{}
@@ -267,7 +269,7 @@ func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
 
 func (kv *ShardKV) installShardWithoutLOCK(op Op) {
 	kv.shardKvStore.install(op.ShardTask, op.DB)
-	fmt.Printf("gid: %d me:%d UNlock shard: %d\n", kv.gid, kv.me, op.ShardTask)
+	fmt.Printf("gid: %d me:%d UNlock shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
 	kv.lastCommandID[op.ClientID] = op.CommandID
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
 	// if _, isLeader := kv.rf.GetState(); isLeader {
@@ -353,17 +355,25 @@ func (kv *ShardKV) readsnapshotWithoutLOCK(snapshot []byte) {
 		kv.shardKvStore = data.KvStore
 		kv.lastCommandID = data.LastCommandID
 		kv.config = data.Config
-		// fmt.Printf("gid:%d me:%d kv:%v\n", kv.gid, kv.me, kv.shardKvStore[0].KvStore)
+		fmt.Printf("gid:%d me:%d lastCommandID:%v\n", kv.gid, kv.me, kv.lastCommandID)
 	}
 }
 
 func (kv *ShardKV) doCommandWithoutLOCK(op Op) bool {
 	switch op.CommandType {
 	case ExecuteCommandType:
-		if kv.status != ConfigNormal {
+		kv.configStatusMachine()
+		if kv.status != ConfigNormal || kv.shardKvStore.status(op.ShardTask) != ShardNormal {
 			fmt.Printf("!!!!!!!!!!gid:%d me:%d value:%v\n", kv.gid, kv.me, op.Value)
 			return false
 		}
+		shardTask := key2shard(op.Key)
+		if kv.config.Shards[shardTask] != kv.gid {
+			DPrintf("[Server] doCommandWithoutLOCK gid:%d  %d key:%s value:%s\n", kv.gid, kv.me, op.Key, op.Value)
+			return false
+		}
+		fmt.Printf("!!!!!!!!!!gid:%d me:%d value:%v kv.status:%d shardstatus[%d]:%d\n", kv.gid, kv.me, op.Value, kv.status, op.ShardTask, kv.shardKvStore.status(op.ShardTask))
+
 		kv.updateKVWithoutLOCK(op)
 	case InstallShardCommandType:
 		kv.installShardWithoutLOCK(op)
@@ -375,7 +385,7 @@ func (kv *ShardKV) doCommandWithoutLOCK(op Op) bool {
 }
 
 func (kv *ShardKV) applier() {
-	for {
+	for !kv.killed() {
 		select {
 		case m := <-kv.applyCh:
 			if m.SnapshotValid {
@@ -390,6 +400,7 @@ func (kv *ShardKV) applier() {
 			} else if m.CommandValid {
 				fmt.Printf("gid:%d %d applyCh:%v\n", kv.gid, kv.me, m)
 				op := m.Command.(Op)
+				// fmt.Printf("gid:%d %d commandID:%d key:%s value:%s\n", kv.gid, kv.me, op.ComandID, op.)
 				kv.mu.Lock()
 				// 1. check commandID
 				// 2. only the new one can update keyvalue db
@@ -495,8 +506,8 @@ func (kv *ShardKV) configStatusMachine() {
 		return
 	}
 
-	fmt.Printf("checkConfig %d gid:%d kv:%d newconfig:%v\n", kv.status, kv.gid, kv.me, newConfig)
-	fmt.Printf("checkConfig %d gid:%d kv:%d oldconfig:%v\n", kv.status, kv.gid, kv.me, curConfig)
+	// fmt.Printf("checkConfig %d gid:%d kv:%d newconfig:%v\n", kv.status, kv.gid, kv.me, newConfig)
+	// fmt.Printf("checkConfig %d gid:%d kv:%d oldconfig:%v\n", kv.status, kv.gid, kv.me, curConfig)
 	// normal
 	for kv.status == ConfigNormal {
 		kv.shardKvStore.clearStatus()
@@ -521,12 +532,29 @@ func (kv *ShardKV) configStatusMachine() {
 		}
 
 		// 3.2 reduce shard task and send the shard db to new gid
+		_, isLeader1 := kv.rf.GetState()
 		for _, shard := range redShardTasks {
 			kv.shardKvStore.setStatus(shard, ShardSending)
 			kv.deletingShard = append(kv.deletingShard, shard)
-			go kv.SendShard(shard, newConfig)
+			if isLeader1 {
+				fmt.Printf("checkConfig %d gid:%d kv:%d newconfig:%v\n", kv.status, kv.gid, kv.me, newConfig)
+				fmt.Printf("checkConfig %d gid:%d kv:%d oldconfig:%v\n", kv.status, kv.gid, kv.me, curConfig)
+				go kv.SendShard(shard, newConfig)
+			} else {
+				kv.status = ConfigFollower
+			}
 		}
 		break
+	}
+
+	if kv.status == ConfigFollower {
+		_, isLeader1 := kv.rf.GetState()
+		if isLeader1 {
+			for _, shard := range kv.deletingShard {
+				go kv.SendShard(shard, newConfig)
+			}
+			kv.status = ConfigRunning
+		}
 	}
 
 	// running
@@ -540,8 +568,12 @@ func (kv *ShardKV) configStatusMachine() {
 
 	// updating
 	if kv.status == ConfigUpdate {
-		kv.status = ConfigUpdating
-		kv.appendUpdateConfig(newConfig)
+		_, isLeader1 := kv.rf.GetState()
+		if isLeader1 {
+			fmt.Printf("appendUpdateConfig gid: %d me:%d %v\n", kv.gid, kv.me, newConfig)
+			kv.status = ConfigUpdating
+			kv.appendUpdateConfig(newConfig)
+		}
 	}
 
 	if kv.status == ConfigUpdating {
@@ -615,7 +647,7 @@ func (kv *ShardKV) checkShardTaskWithoutLOCK(key string) bool {
 }
 
 func (kv *ShardKV) queryConfigWithoutLOCK() {
-	kv.config = kv.sm.Query(-1)
+	kv.config = kv.sm.Query(0)
 	// for shardID, gid := range kv.config.Shards {
 	// 	if gid == kv.gid {
 	// 		kv.shardTasks[shardID] = struct{}{}
@@ -626,13 +658,13 @@ func (kv *ShardKV) queryConfigWithoutLOCK() {
 // 每隔一段时间取查看configuration
 func (kv *ShardKV) ticker() {
 	// only leader can do?
-	for {
-		if _, isLeader := kv.rf.GetState(); isLeader {
-			kv.mu.Lock()
-			// kv.checkConfig()
-			kv.configStatusMachine()
-			kv.mu.Unlock()
-		}
+	for !kv.killed() {
+		// if _, isLeader := kv.rf.GetState(); isLeader {
+		kv.mu.Lock()
+		// kv.checkConfig()
+		kv.configStatusMachine()
+		kv.mu.Unlock()
+		// }
 		time.Sleep(100 * time.Microsecond)
 	}
 }
@@ -644,8 +676,13 @@ func (kv *ShardKV) ticker() {
 // turn off debug output from this instance.
 //
 func (kv *ShardKV) Kill() {
+	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+}
+func (kv *ShardKV) killed() bool {
+	z := atomic.LoadInt32(&kv.dead)
+	return z == 1
 }
 
 //
@@ -692,7 +729,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-
+	fmt.Printf("gid: %d me: %d aassda\n", kv.gid, kv.me)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.deletingShard = make([]int, 0)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
