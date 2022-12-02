@@ -4,14 +4,23 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.824/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	mrand "math/rand"
+	"sync"
+	"time"
+
+	"6.824/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	leader        int
+	clientID      int64
+	nextCommandID int64
+	mu            sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,77 +34,142 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.leader = mrand.Intn(len(ck.servers))
+	ck.clientID = nrand()
+	DPrintf("ck.clientID:%d\n", ck.clientID)
+	ck.nextCommandID = 0
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
 	// Your code here.
-	args.Num = num
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args := &QueryArgs{
+		Num:       num,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
+	reply := &QueryReply{}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+		if ck.servers[ck.leader].Call("ShardCtrler.Query", args, reply) {
+			DPrintf("[Client] <Query> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				DPrintf("[Client] <Query> client[%d] server[%d] is leader config:%v\n", ck.clientID, ck.leader, reply.Config)
 				return reply.Config
 			}
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <Query> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
+			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <Query> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
 	// Your code here.
-	args.Servers = servers
-
+	args := &JoinArgs{
+		Servers:   servers,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	reply := &JoinReply{}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+		DPrintf("[Client] <Join> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
+		if ck.servers[ck.leader].Call("ShardCtrler.Join", args, reply) {
+			DPrintf("[Client] <Join> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				DPrintf("[Client] <Join> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				return
 			}
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <Join> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
+			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <Join> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
 	// Your code here.
-	args.GIDs = gids
+	args := &LeaveArgs{
+		GIDs:      gids,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
 
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	reply := &LeaveReply{}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+		DPrintf("[Client] <Leave> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
+		if ck.servers[ck.leader].Call("ShardCtrler.Leave", args, reply) {
+			DPrintf("[Client] <Leave> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				DPrintf("[Client] <Leave> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				return
 			}
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <Leave> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
+			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <Leave> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
 	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
+	args := &MoveArgs{
+		Shard:     shard,
+		GID:       gid,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	reply := &MoveReply{}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+		DPrintf("[Client] <Move> client[%d] client send to server[%d] command[%d] %v\n", ck.clientID, ck.leader, ck.nextCommandID, args)
+		if ck.servers[ck.leader].Call("ShardCtrler.Move", args, reply) {
+			DPrintf("[Client] <Move> client[%d] mesg from server[%d] command[%d] Err:%v\n", ck.clientID, ck.leader, ck.nextCommandID, reply.Err)
+			if reply.Err == OK {
+				ck.nextCommandID++
+				DPrintf("[Client] <Move> client[%d] server[%d] is leader\n", ck.clientID, ck.leader)
 				return
 			}
+			if reply.Err == ErrWrongLeader {
+				ck.leader = mrand.Intn(len(ck.servers))
+				DPrintf("[Client] <Move> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+				continue
+			}
+		} else {
+			ck.leader = mrand.Intn(len(ck.servers))
+			DPrintf("[Client] <Move> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Microsecond)
 	}
 }
