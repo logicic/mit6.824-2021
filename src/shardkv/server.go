@@ -76,6 +76,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		CommandID:   args.CommandID,
 	}
 	kv.mu.Lock()
+	term, isLeader1 := kv.rf.GetState()
+	if !isLeader1 {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		DPrintf("[Server] <Get> gid: %d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
+		return
+	}
 	// 0. check shard
 	shardTask := key2shard(command.Key)
 	if kv.config.Shards[shardTask] != kv.gid {
@@ -105,7 +112,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	// 2. check leader role and append logEntry
-	term, isLeader1 := kv.rf.GetState()
+
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
@@ -141,7 +148,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
 	}
-	DPrintf("[Server] <Get> gid:%d %d finish! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <Get> gid:%d %d finish! ClientID[%d] ComandID[%d] Err:%s\n", kv.gid, kv.me, args.ClientID, args.CommandID, reply.Err)
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -164,6 +171,13 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		CommandID:   args.CommandID,
 	}
 	kv.mu.Lock()
+	term, isLeader1 := kv.rf.GetState()
+	if !isLeader1 {
+		reply.Err = ErrWrongLeader
+		DPrintf("[Server] <PutAppend> gid:%d  follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
+		kv.mu.Unlock()
+		return
+	}
 	// 0. check shard
 	shardTask := key2shard(command.Key)
 	if kv.config.Shards[shardTask] != kv.gid {
@@ -185,7 +199,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	// 2. check leader role and append logEntry
-	term, isLeader1 := kv.rf.GetState()
+
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
@@ -213,7 +227,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// kv.mu.Lock()
 	// kv.deleteCommandChanWithoutLOCK(command)
 	// kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> gid:%d %d finish! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <PutAppend> gid:%d %d finish! ClientID[%d] ComandID[%d] Err:%s\n", kv.gid, kv.me, args.ClientID, args.CommandID, reply.Err)
 }
 
 func (kv *ShardKV) updateKVWithoutLOCK(op Op) {
@@ -344,7 +358,7 @@ func (kv *ShardKV) doCommandWithoutLOCK(op Op) bool {
 	switch op.CommandType {
 	case ExecuteCommandType:
 		if kv.status != ConfigNormal {
-			fmt.Printf("!!!!!!!!!!")
+			fmt.Printf("!!!!!!!!!!gid:%d me:%d value:%v\n", kv.gid, kv.me, op.Value)
 			return false
 		}
 		kv.updateKVWithoutLOCK(op)
@@ -478,6 +492,7 @@ func (kv *ShardKV) configStatusMachine() {
 	fmt.Printf("checkConfig %d gid:%d kv:%d oldconfig:%v\n", kv.status, kv.gid, kv.me, curConfig)
 	// normal
 	for kv.status == ConfigNormal {
+		kv.shardKvStore.clearStatus()
 		kv.status = ConfigRunning
 		if curConfig.Num == 0 {
 			kv.status = ConfigUpdate

@@ -35,7 +35,10 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 	// }
 	kv.mu.Unlock()
 	for {
-
+		_, isLeader1 := kv.rf.GetState()
+		if !isLeader1 {
+			return
+		}
 		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, kv.config, time.Now())
 		DPrintf("[Client] <SendShard> client[%d] send to gid[%d] try shard:%d db:%v commandID:%d\n", args.ClientID, gid, shardNum, args.DB, args.CommandID)
 		if servers, ok := config.Groups[gid]; ok {
