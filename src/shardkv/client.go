@@ -8,11 +8,15 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.824/shardctrler"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+
+	"6.824/labrpc"
+	"6.824/shardctrler"
+)
 
 //
 // which shard is a key in?
@@ -40,6 +44,10 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	leader        int
+	clientID      int64
+	nextCommandID int64
+	mu            sync.Mutex
 }
 
 //
@@ -56,6 +64,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientID = nrand()
+	DPrintf("ck.clientID:%d\n", ck.clientID)
+	ck.nextCommandID = 0
 	return ck
 }
 
@@ -66,8 +77,13 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args := GetArgs{
+		Key:       key,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
 
 	for {
 		shard := key2shard(key)
@@ -77,14 +93,20 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
+				if srv.Call("ShardKV.Get", &args, &reply) {
+					if reply.Err == OK || reply.Err == ErrNoKey {
+						ck.nextCommandID++
+						return reply.Value
+					}
+					if reply.Err == ErrWrongGroup {
+						break
+					}
+					// ... not ok, or ErrWrongLeader
+					if reply.Err == ErrWrongLeader {
+						DPrintf("[Client] <Get> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+						continue
+					}
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -100,11 +122,15 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientID:  ck.clientID,
+		CommandID: ck.nextCommandID,
+	}
 
 	for {
 		shard := key2shard(key)
@@ -115,12 +141,17 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					ck.nextCommandID++
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
 					break
 				}
 				// ... not ok, or ErrWrongLeader
+				if ok && reply.Err == ErrWrongLeader {
+					DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
+					continue
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
