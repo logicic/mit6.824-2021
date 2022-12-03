@@ -88,6 +88,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		DPrintf("[Client] <Get> client[%d] gid[%d] try args:%v\n", ck.clientID, gid, args)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -105,6 +106,10 @@ func (ck *Clerk) Get(key string) string {
 					if reply.Err == ErrWrongLeader {
 						DPrintf("[Client] <Get> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
 						continue
+					}
+
+					if reply.Err == ErrShardWaiting {
+						break
 					}
 				}
 			}
@@ -135,6 +140,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		DPrintf("[Client] <PutAppend> client[%d] gid[%d] try PutAppendArgs:%v\n", ck.clientID, gid, args)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -151,6 +157,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == ErrWrongLeader {
 					DPrintf("[Client] <PutAppend> client[%d] server[%d] try leader\n", ck.clientID, ck.leader)
 					continue
+				}
+
+				if ok && reply.Err == ErrShardWaiting {
+					break
 				}
 			}
 		}

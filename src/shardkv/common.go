@@ -18,6 +18,7 @@ const (
 	ErrWrongLeader  = "ErrWrongLeader"
 	ErrTimeOut      = "ErrTimeOut"
 	ErrDuplicateReq = "ErrDuplicateRequest"
+	ErrShardWaiting = "ErrShardWaiting"
 
 	ExecuteTimeout = 1 * time.Second
 )
@@ -30,29 +31,35 @@ const (
 	UpdateConfigCommandType = 103
 )
 
+// server for client status
+const (
+	GroupServing = 200
+	GroupWaiting = 201
+)
+
 type Err string
 type shardKvStore []*shardKvDB
 
 type shardKvDB struct {
-	shardID int
-	kvStore map[string]string
+	ShardID int
+	KvStore map[string]string
 }
 
 func (db *shardKvDB) get(key string) (value string, ok bool) {
-	value, ok = db.kvStore[key]
+	value, ok = db.KvStore[key]
 	return
 }
 
 func (db *shardKvDB) insert(key, value string) {
-	db.kvStore[key] = value
+	db.KvStore[key] = value
 }
 
 func newShardKvStore(shardNum int) shardKvStore {
 	dbs := make(shardKvStore, shardNum)
 	for id := range dbs {
 		db := &shardKvDB{
-			shardID: id,
-			kvStore: make(map[string]string),
+			ShardID: id,
+			KvStore: make(map[string]string),
 		}
 		dbs[id] = db
 	}
@@ -65,11 +72,33 @@ func (db shardKvStore) get(shard int, key string) (value string, ok bool) {
 }
 
 func (db shardKvStore) put(shard int, key, value string) {
-	db[shard].kvStore[key] = value
+	db[shard].KvStore[key] = value
 }
 
 func (db shardKvStore) append(shard int, key, value string) {
-	db[shard].kvStore[key] = db[shard].kvStore[key] + value
+	db[shard].KvStore[key] = db[shard].KvStore[key] + value
+}
+
+func (db shardKvStore) shard(shard int) shardKvDB {
+	returndb := shardKvDB{
+		ShardID: shard,
+		KvStore: make(map[string]string),
+	}
+	for k, v := range db[shard].KvStore {
+		returndb.KvStore[k] = v
+	}
+	return returndb
+}
+
+func (db shardKvStore) install(shard int, sdb shardKvDB) {
+	db[shard].ShardID = shard
+	for k, v := range sdb.KvStore {
+		db[shard].KvStore[k] = v
+	}
+}
+
+func (db shardKvStore) print(gid, shard int) {
+	DPrintf("gid:%d kv:%+v\n", gid, db[shard])
 }
 
 // Put or Append

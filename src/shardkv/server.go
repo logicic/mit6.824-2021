@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"6.824/shardctrler"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -27,6 +28,8 @@ type Op struct {
 	// otherwise RPC will break.
 	CommandType int
 	ShardTask   int
+	Config      shardctrler.Config
+	DB          shardKvDB
 	Op          int
 	Key         string
 	Value       string
@@ -52,6 +55,7 @@ type ShardKV struct {
 	shardKvStore  shardKvStore
 	clientCh      map[int64]map[int64]chan int64
 	lastCommandID map[int64]int64
+	status        int
 }
 
 type snapshotData struct {
@@ -61,7 +65,7 @@ type snapshotData struct {
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	DPrintf("[Server] <Get> %d recv %v\n", kv.me, args)
+	DPrintf("[Server] <Get> gid:%d  %d recv %v\n", kv.gid, kv.me, args)
 	command := Op{
 		CommandType: ExecuteCommandType,
 		Op:          0,
@@ -90,6 +94,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 		return
 	}
+
+	if kv.status == GroupWaiting {
+		kv.mu.Unlock()
+		reply.Err = ErrShardWaiting
+		return
+	}
+
 	// 2. check leader role and append logEntry
 	term, isLeader1 := kv.rf.GetState()
 	command.Term = term
@@ -97,16 +108,15 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	if !isLeader1 || !isLeader2 {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
-		DPrintf("[Server] <Get> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+		DPrintf("[Server] <Get> gid: %d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		return
 	}
 
-	DPrintf("[Server] <Get> begin![%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <Get> gid:%d begin![%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
-	DPrintf("[Server] <Get> UNLOCK[%d]!", kv.me)
 	kv.mu.Unlock()
-	DPrintf("[Server] <Get> WAIT commandCH[%d]!", kv.me)
+	DPrintf("[Server] <Get> gid:%d WAIT commandCH[%d]!", kv.gid, kv.me)
 	reply.Err = OK
 
 	// 4. wait the command data from channel
@@ -123,7 +133,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ErrNoKey
 		}
 		reply.Value = value
-		DPrintf("%d kv:%v\n", kv.me, kv.shardKvStore)
 		kv.mu.Unlock()
 		return
 	case <-time.After(ExecuteTimeout):
@@ -133,7 +142,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	DPrintf("[Server] <PutAppend> %d recv %v\n", kv.me, args)
+	DPrintf("[Server] <PutAppend> gid:%d %d recv %v\n", kv.gid, kv.me, args)
 	o := -1
 	if args.Op == "Put" {
 		o = 1
@@ -165,22 +174,28 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = OK
 		return
 	}
+
+	if kv.status == GroupWaiting {
+		kv.mu.Unlock()
+		reply.Err = ErrShardWaiting
+		return
+	}
+
 	// 2. check leader role and append logEntry
 	term, isLeader1 := kv.rf.GetState()
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
 		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <PutAppend> follower[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+		DPrintf("[Server] <PutAppend> gid:%d  follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		kv.mu.Unlock()
 		return
 	}
-	DPrintf("[Server] <PutAppend> begin![%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <PutAppend> gid:%d begin![%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
-	DPrintf("[Server] <PutAppend> UNLOCK[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
 	kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> WAIT commandCH[%d]! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <PutAppend> gid:%d WAIT commandCH[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	reply.Err = OK
 	// 4. wait the command data from channel
 	select {
@@ -195,7 +210,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// kv.mu.Lock()
 	// kv.deleteCommandChanWithoutLOCK(command)
 	// kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> %d finish! ClientID[%d] ComandID[%d]\n", kv.me, args.ClientID, args.CommandID)
+	DPrintf("[Server] <PutAppend> gid:%d %d finish! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 }
 
 func (kv *ShardKV) updateKVWithoutLOCK(op Op) {
@@ -211,7 +226,20 @@ func (kv *ShardKV) updateKVWithoutLOCK(op Op) {
 		// GET
 		DPrintf("[Server] <applier> %d op:[GET] clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
 	}
+	kv.shardKvStore.print(kv.gid, key2shard(op.Key))
 	kv.lastCommandID[op.ClientID] = op.CommandID
+}
+
+func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
+	kv.config = op.Config
+	kv.lastCommandID[op.ClientID] = op.CommandID
+}
+
+func (kv *ShardKV) installShardWithoutLOCK(op Op) {
+	kv.shardKvStore.install(op.ShardTask, op.DB)
+	kv.status = GroupServing
+	kv.lastCommandID[op.ClientID] = op.CommandID
+	fmt.Printf("group[%d] %d kv:%v\n", kv.gid, kv.me, kv.shardKvStore.shard(op.ShardTask))
 }
 
 func (kv *ShardKV) makeCommandChanWithoutLOCK(op Op) chan int64 {
@@ -281,6 +309,7 @@ func (kv *ShardKV) readsnapshotWithoutLOCK(snapshot []byte) {
 		}
 		kv.shardKvStore = data.KvStore
 		kv.lastCommandID = data.LastCommandID
+		fmt.Printf("gid:%d me:%d kv:%v\n", kv.gid, kv.me, kv.shardKvStore[0].KvStore)
 	}
 }
 
@@ -289,8 +318,10 @@ func (kv *ShardKV) doCommandWithoutLOCK(op Op) {
 	case ExecuteCommandType:
 		kv.updateKVWithoutLOCK(op)
 	case InstallShardCommandType:
+		kv.installShardWithoutLOCK(op)
 	case DeleteShardCommandType:
 	case UpdateConfigCommandType:
+		kv.updateConfigWithoutLOCK(op)
 	}
 }
 
@@ -345,6 +376,50 @@ func (kv *ShardKV) applier() {
 	}
 }
 
+func (kv *ShardKV) appendUpdateConfig() {
+	command := Op{
+		CommandType: UpdateConfigCommandType,
+		ClientID:    int64(kv.gid),
+		CommandID:   kv.lastCommandID[int64(kv.gid)] + 1,
+		Config:      kv.config,
+	}
+	term, isLeader1 := kv.rf.GetState()
+	command.Term = term
+	_, term, isLeader2 := kv.rf.Start(command)
+	if !isLeader1 || !isLeader2 {
+		return
+	}
+}
+
+/*
+shard 任务变更情况，需要知道：
+1. 这一个gid需要处理的shardNum变化情况
+2. 变少了，需要发送相应shardNum的db给对应shardNum的新gid下的server
+3. 变多了，需要等待对方的shardNum的db发过来，更新db再对外提供服务
+4. （需要区分由gid0变1的特殊情况）
+*/
+func (kv *ShardKV) shardTaskMoved(newConfig shardctrler.Config) (addShardTasks []int, redShardTasks []int) {
+
+	for shardID, gid := range newConfig.Shards {
+		if gid == kv.gid {
+			// find out the new shardID
+			if _, ok := kv.shardTasks[shardID]; !ok {
+				addShardTasks = append(addShardTasks, shardID)
+				kv.shardTasks[shardID] = struct{}{}
+			}
+		}
+	}
+
+	for shardId := range kv.shardTasks {
+		if newConfig.Shards[shardId] != kv.gid {
+			// find out the moved shardID
+			redShardTasks = append(redShardTasks, shardId)
+			delete(kv.shardTasks, shardId)
+		}
+	}
+	return
+}
+
 /*
 检查configuration的标准：
 0. 由于shardController对于group的join和leave会对shard-gid进行reblance
@@ -361,27 +436,31 @@ func (kv *ShardKV) checkConfig() {
 	}
 
 	// 2. check whether shard is modified
-	modified := false
-	count := 0
-	for shardID, gid := range newConfig.Shards {
-		if gid == kv.gid {
-			// find out the new shardID
-			count++
-			if _, ok := kv.shardTasks[shardID]; !ok {
-				modified = true
-			}
-		}
-	}
-	if count != len(kv.shardTasks) {
-		modified = true
-	}
+	addShardTasks, redShardTasks := kv.shardTaskMoved(newConfig)
 	// 2.2 changed
 	kv.config = newConfig
-	if !modified {
+	if len(addShardTasks) == 0 && len(redShardTasks) == 0 {
+		// only update config
+		kv.appendUpdateConfig()
 		return
 	}
 
 	// 3. migrate kv data and logEntry data
+
+	// 3.3 update the new config
+	kv.appendUpdateConfig()
+	// 3.1 add shard task and wait new shard db
+	if curCofnig.Num == 0 {
+		return
+	}
+	if len(addShardTasks) > 0 {
+		kv.status = GroupWaiting
+	}
+	fmt.Printf("%d addShardTasks:%v redShardTasks:%v\n", kv.me, addShardTasks, redShardTasks)
+	// 3.2 reduce shard task and send the shard db to new gid
+	for _, shard := range redShardTasks {
+		kv.SendShard(shard)
+	}
 
 }
 
@@ -401,13 +480,14 @@ func (kv *ShardKV) queryConfigWithoutLOCK() {
 
 // 每隔一段时间取查看configuration
 func (kv *ShardKV) ticker() {
+	// only leader can do?
 	for {
-		select {
-		case <-time.After(100 * time.Millisecond):
+		if _, isLeader := kv.rf.GetState(); isLeader {
 			kv.mu.Lock()
 			kv.checkConfig()
 			kv.mu.Unlock()
 		}
+		time.Sleep(100 * time.Microsecond)
 	}
 }
 
