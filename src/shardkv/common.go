@@ -1,6 +1,9 @@
 package shardkv
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 //
 // Sharded key/value server.
@@ -25,16 +28,28 @@ const (
 
 // command type
 const (
-	ExecuteCommandType      = 100
-	InstallShardCommandType = 101
-	DeleteShardCommandType  = 102
-	UpdateConfigCommandType = 103
+	ExecuteCommandType      = 300
+	InstallShardCommandType = 301
+	DeleteShardCommandType  = 302
+	UpdateConfigCommandType = 303
 )
 
 // server for client status
+// const (
+// 	GroupServing  = 200
+// 	GroupWaiting  = 201
+// 	ConfigWaiting = 202
+// )
+
 const (
-	GroupServing = 200
-	GroupWaiting = 201
+	ConfigNormal   = 10
+	ConfigRunning  = 11
+	ConfigUpdate   = 12
+	ConfigUpdating = 13
+
+	ShardNormal  = 0
+	ShardWaiting = 15
+	ShardSending = 16
 )
 
 type Err string
@@ -42,6 +57,7 @@ type shardKvStore []*shardKvDB
 
 type shardKvDB struct {
 	ShardID int
+	Status  int
 	KvStore map[string]string
 }
 
@@ -97,8 +113,51 @@ func (db shardKvStore) install(shard int, sdb shardKvDB) {
 	}
 }
 
-func (db shardKvStore) print(gid, shard int) {
-	DPrintf("gid:%d kv:%+v\n", gid, db[shard])
+func (db shardKvStore) status(shard int) int {
+	return db[shard].Status
+}
+
+func (db shardKvStore) clearStatus() {
+	for shard := range db {
+		db[shard].Status = ShardNormal
+	}
+}
+
+func (db shardKvStore) checkStatus(status int) bool {
+	for shard := range db {
+		if db[shard].Status == status {
+			return false
+		}
+	}
+	return true
+}
+
+func (db shardKvStore) isNormal() bool {
+	for shard := range db {
+		fmt.Printf("db[%d].Status:%v\n", shard, db[shard].Status)
+		if db[shard].Status != ShardNormal {
+			return false
+		}
+	}
+	return true
+}
+
+// func (db shardKvStore) allStatus() bool {
+// 	for shard := range db {
+// 		fmt.Printf("db[shard].Status:%v\n", db[shard].Status)
+// 		if db[shard].Status == GroupWaiting {
+// 			return false
+// 		}
+// 	}
+// 	return true
+// }
+func (db shardKvStore) setStatus(shard int, status int) {
+	db[shard].Status = status
+}
+func (db shardKvStore) print(gid, me int) {
+	for i := range db {
+		DPrintf("############## gid:%d kv:%d db[%d]:%v", gid, me, db[i].ShardID, db[i].KvStore)
+	}
 }
 
 // Put or Append

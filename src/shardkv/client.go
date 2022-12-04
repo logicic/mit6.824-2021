@@ -88,7 +88,8 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		DPrintf("[Client] <Get> client[%d] gid[%d] try args:%v\n", ck.clientID, gid, args)
+		// fmt.Printf("[Client] <Get> gid:%d kv:%d config:%v At:%v\n", gid, args.ClientID, ck.config, time.Now())
+		DPrintf("[Client] <Get> client[%d] gid[%d] try shard:%d key:%s commandID:%d\n", ck.clientID, gid, shard, key, args.CommandID)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -140,7 +141,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		DPrintf("[Client] <PutAppend> client[%d] gid[%d] try PutAppendArgs:%v\n", ck.clientID, gid, args)
+		// fmt.Printf("[Client] <PutAppend> gid:%d kv:%d config:%v At:%v\n", gid, args.ClientID, ck.config, time.Now())
+		DPrintf("[Client] <PutAppend> client[%d] gid[%d] try shard:%d key:%s value:%s commandID:%d\n", ck.clientID, gid, shard, key, value, args.CommandID)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])

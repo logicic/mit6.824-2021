@@ -203,7 +203,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 }
 
 func (sc *ShardCtrler) queryWithoutLOCK(num int) Config {
-	if num < 0 {
+	if num < 0 || num > len(sc.configs)-1 {
 		return sc.configs[len(sc.configs)-1]
 	}
 	return sc.configs[num]
