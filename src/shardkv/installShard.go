@@ -20,12 +20,12 @@ type InstallShardReply struct {
 
 // send shard to matched gid servers
 func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
-	// kv.mu.Lock()
+	kv.mu.Lock()
 	// defer kv.mu.Unlock()
 	gid := config.Shards[shardNum]
 	args := InstallShardArgs{
-		ClientID:  int64(kv.gid),
-		CommandID: kv.lastCommandID[int64(gid)] + 1,
+		ClientID:  int64(kv.gid*10 + shardNum),
+		CommandID: kv.lastCommandID[int64(gid*10+shardNum)] + 1,
 		DB:        kv.shardKvStore.shard(shardNum),
 		ShardNum:  shardNum,
 		Config:    config,
@@ -33,6 +33,7 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 	// if len(args.DB.KvStore) == 0 {
 	// 	return
 	// }
+	kv.mu.Unlock()
 	for {
 
 		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, kv.config, time.Now())
@@ -43,8 +44,10 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 				var reply InstallShardReply
 				ok := srv.Call("ShardKV.InstallShard", &args, &reply)
 				if ok && reply.Err == OK {
-					kv.lastCommandID[int64(gid)] = args.CommandID
+					kv.mu.Lock()
+					kv.lastCommandID[int64(gid*10+shardNum)] = args.CommandID
 					kv.shardKvStore.setStatus(shardNum, ShardNormal)
+					kv.mu.Unlock()
 					return
 				}
 				// ... not ok, or ErrWrongLeader
@@ -73,11 +76,12 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 	}
 
 	kv.mu.Lock()
-	// if args.Config.Num <= kv.config.Num {
-	// 	kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
-	// 	kv.mu.Unlock()
-	// 	reply.Err = OK
-	// }
+	if args.Config.Num <= kv.config.Num {
+		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
 	// 1. check duplicate and out-date data
 	if !kv.checkCommandIDWithoutLOCK(command) {
 		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
