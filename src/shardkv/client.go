@@ -112,6 +112,12 @@ func (ck *Clerk) Get(key string) string {
 					if reply.Err == ErrShardWaiting {
 						break
 					}
+
+					if reply.Err == ErrSendAgain {
+						ck.nextCommandID++
+						args.CommandID = ck.nextCommandID
+						break
+					}
 				}
 			}
 		}
@@ -162,6 +168,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 
 				if ok && reply.Err == ErrShardWaiting {
+					break
+				}
+
+				if reply.Err == ErrSendAgain {
+					ck.nextCommandID++
+					args.CommandID = ck.nextCommandID
 					break
 				}
 			}

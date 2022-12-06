@@ -22,6 +22,7 @@ const (
 	ErrTimeOut      = "ErrTimeOut"
 	ErrDuplicateReq = "ErrDuplicateRequest"
 	ErrShardWaiting = "ErrShardWaiting"
+	ErrSendAgain    = "ErrSendAgain"
 
 	ExecuteTimeout = 1 * time.Second
 )
@@ -40,7 +41,7 @@ const (
 // 	GroupWaiting  = 201
 // 	ConfigWaiting = 202
 // )
-
+const Waiting = -101
 const (
 	ConfigNormal   = 10
 	ConfigRunning  = 11
@@ -70,6 +71,11 @@ func (db *shardKvDB) insert(key, value string) {
 	db.KvStore[key] = value
 }
 
+func (db *shardKvDB) clear() {
+	db.KvStore = make(map[string]string)
+	db.Status = ShardNormal
+}
+
 func newShardKvStore(shardNum int) shardKvStore {
 	dbs := make(shardKvStore, shardNum)
 	for id := range dbs {
@@ -93,6 +99,12 @@ func (db shardKvStore) put(shard int, key, value string) {
 
 func (db shardKvStore) append(shard int, key, value string) {
 	db[shard].KvStore[key] = db[shard].KvStore[key] + value
+}
+
+func (db shardKvStore) deleteBatch(shards []int) {
+	for _, shard := range shards {
+		db[shard].clear()
+	}
 }
 
 func (db shardKvStore) shard(shard int) shardKvDB {
@@ -133,13 +145,14 @@ func (db shardKvStore) checkStatus(status int) bool {
 }
 
 func (db shardKvStore) isNormal() bool {
+	ok := true
 	for shard := range db {
 		fmt.Printf("db[%d].Status:%v\n", shard, db[shard].Status)
 		if db[shard].Status != ShardNormal {
-			return false
+			ok = false
 		}
 	}
-	return true
+	return ok
 }
 
 // func (db shardKvStore) allStatus() bool {
