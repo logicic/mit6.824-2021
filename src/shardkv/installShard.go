@@ -24,15 +24,12 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 	// defer kv.mu.Unlock()
 	gid := config.Shards[shardNum]
 	args := InstallShardArgs{
-		ClientID:  int64(kv.gid*10 + shardNum),
-		CommandID: kv.lastCommandID[int64(gid*10+shardNum)] + 1,
+		ClientID:  kv.shardKvStore.id(shardNum),
+		CommandID: kv.lastCommandID[kv.shardKvStore.id(shardNum)] + 1,
 		DB:        kv.shardKvStore.shard(shardNum),
 		ShardNum:  shardNum,
 		Config:    config,
 	}
-	// if len(args.DB.KvStore) == 0 {
-	// 	return
-	// }
 	kv.mu.Unlock()
 	for {
 		_, isLeader1 := kv.rf.GetState()
@@ -51,7 +48,7 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 		if !ok {
 			return
 		}
-		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, kv.config, time.Now())
+		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, config, time.Now())
 		DPrintf("[Client] <SendShard> client[%d] send to gid[%d] try shard:%d db:%v commandID:%d\n", args.ClientID, gid, shardNum, args.DB, args.CommandID)
 		if servers, ok := config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
@@ -60,13 +57,14 @@ func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
 				ok := srv.Call("ShardKV.InstallShard", &args, &reply)
 				if ok && reply.Err == OK {
 					kv.mu.Lock()
-					kv.lastCommandID[int64(gid*10+shardNum)] = args.CommandID
+					kv.lastCommandID[args.ClientID] = args.CommandID
 					kv.shardKvStore.setStatus(shardNum, ShardNormal)
 					kv.mu.Unlock()
 					return
 				}
 				// ... not ok, or ErrWrongLeader
 				if ok && reply.Err == ErrWrongLeader {
+					fmt.Printf("ErrWrongLeaderSendShard gid:%d kv:%d config:%v servers:%d\n", kv.gid, kv.me, config, si)
 					continue
 				}
 
@@ -141,14 +139,8 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 			// return
 			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, args.CommandID)
 		}
-		kv.mu.Lock()
-		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
-		kv.mu.Unlock()
 	case <-time.After(ExecuteTimeout):
 		reply.Err = ErrTimeOut
 	}
-	// kv.mu.Lock()
-	// kv.deleteCommandChanWithoutLOCK(command)
-	// kv.mu.Unlock()
 	DPrintf("[Server] <InstallShard>finish! gid:%d me:%d  ClientID[%d] ComandID[%d] Err:%s\n", kv.gid, kv.me, args.ClientID, args.CommandID, reply.Err)
 }

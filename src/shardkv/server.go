@@ -54,7 +54,6 @@ type ShardKV struct {
 	dead          int32 // set by Kill()
 	sm            *shardctrler.Clerk
 	config        shardctrler.Config
-	shardTasks    map[int]struct{}
 	shardKvStore  shardKvStore
 	clientCh      map[int64]map[int64]chan int64
 	lastCommandID map[int64]int64
@@ -272,18 +271,6 @@ func (kv *ShardKV) installShardWithoutLOCK(op Op) {
 	fmt.Printf("gid: %d me:%d UNlock shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
 	kv.lastCommandID[op.ClientID] = op.CommandID
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
-	// if _, isLeader := kv.rf.GetState(); isLeader {
-	// 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
-	// 	DPrintf("gid: %d me:%d UNlock shard: %d\n", kv.gid, kv.me, op.ShardTask)
-	// 	// 	if kv.shardKvStore.allStatus() {
-	// 	// 		if kv.config.Num < op.Config.Num {
-	// 	// 			kv.appendUpdateConfig(op.Config)
-	// 	// 			DPrintf("gid: %d me:%d UNlock kv.config: %v\n", kv.gid, kv.me, kv.config)
-	// 	// 		}
-	// 	// 	}
-	// }
-
-	// fmt.Printf("group[%d] %d kv:%v\n", kv.gid, kv.me, kv.shardKvStore.shard(op.ShardTask))
 }
 
 func (kv *ShardKV) makeCommandChanWithoutLOCK(op Op) chan int64 {
@@ -499,6 +486,13 @@ func (kv *ShardKV) shardTaskMoved(curConfig, newConfig shardctrler.Config) (addS
 	return
 }
 
+/*
+检查configuration的标准：
+0. 由于shardController对于group的join和leave会对shard-gid进行reblance
+1. 需要对比当前的server所属的gid，以及match的shard是否发生了变化（与上一次检查所保留的结果）
+2. 如果发生了变化，放弃此次所有的client request，把当前的已经commited的kv以及（commited和未commited）log转发
+到真正shard的server上（需要只是leader发送？）
+*/
 func (kv *ShardKV) configStatusMachine() {
 	curConfig := kv.config
 	newConfig := kv.sm.Query(curConfig.Num + 1)
@@ -533,15 +527,17 @@ func (kv *ShardKV) configStatusMachine() {
 
 		// 3.2 reduce shard task and send the shard db to new gid
 		_, isLeader1 := kv.rf.GetState()
-		for _, shard := range redShardTasks {
-			kv.shardKvStore.setStatus(shard, ShardSending)
-			kv.deletingShard = append(kv.deletingShard, shard)
-			if isLeader1 {
-				fmt.Printf("checkConfig %d gid:%d kv:%d newconfig:%v\n", kv.status, kv.gid, kv.me, newConfig)
-				fmt.Printf("checkConfig %d gid:%d kv:%d oldconfig:%v\n", kv.status, kv.gid, kv.me, curConfig)
+		if isLeader1 {
+			for _, shard := range redShardTasks {
+				kv.shardKvStore.setStatus(shard, ShardSending)
+				kv.deletingShard = append(kv.deletingShard, shard)
 				go kv.SendShard(shard, newConfig)
-			} else {
-				kv.status = ConfigFollower
+			}
+		} else {
+			kv.status = ConfigFollower
+			for _, shard := range redShardTasks {
+				kv.shardKvStore.setStatus(shard, ShardSending)
+				kv.deletingShard = append(kv.deletingShard, shard)
 			}
 		}
 		break
@@ -581,78 +577,9 @@ func (kv *ShardKV) configStatusMachine() {
 	}
 }
 
-/*
-检查configuration的标准：
-0. 由于shardController对于group的join和leave会对shard-gid进行reblance
-1. 需要对比当前的server所属的gid，以及match的shard是否发生了变化（与上一次检查所保留的结果）
-2. 如果发生了变化，放弃此次所有的client request，把当前的已经commited的kv以及（commited和未commited）log转发
-到真正shard的server上（需要只是leader发送？）
-*/
-// func (kv *ShardKV) checkConfig() {
-// 	curConfig := kv.config
-// 	newConfig := kv.sm.Query(curConfig.Num + 1)
-// 	fmt.Printf("checkConfig gid:%d kv:%d newconfig:%v\n", kv.gid, kv.me, newConfig)
-// 	fmt.Printf("checkConfig gid:%d kv:%d oldconfig:%v\n", kv.gid, kv.me, curConfig)
-// 	// 1. check whether config is new
-// 	if newConfig.Num <= curConfig.Num {
-// 		return
-// 	}
-
-// 	if kv.status == ConfigWaiting {
-// 		return
-// 	}
-// 	// 2. check whether shard is modified
-// 	addShardTasks, redShardTasks := kv.shardTaskMoved(curConfig, newConfig)
-// 	fmt.Printf("%d addShardTasks:%v redShardTasks:%v\n", kv.me, addShardTasks, redShardTasks)
-// 	// 2.2 changed
-// 	// kv.config = newConfig
-// 	if len(addShardTasks) == 0 && len(redShardTasks) == 0 {
-// 		// only update config
-// 		kv.status = ConfigWaiting
-// 		kv.appendUpdateConfig(newConfig)
-// 		return
-// 	}
-
-// 	// 3. migrate kv data and logEntry data
-
-// 	// 3.3 update the new config
-// 	// 3.1 add shard task and wait new shard db
-// 	if curConfig.Num == 0 {
-// 		kv.status = ConfigWaiting
-// 		kv.appendUpdateConfig(newConfig)
-// 		return
-// 	}
-// 	for _, shard := range addShardTasks {
-// 		kv.shardKvStore[shard].Status = GroupWaiting
-// 		DPrintf("gid: %d me:%d lock shard: %d\n", kv.gid, kv.me, shard)
-// 	}
-
-// 	// 3.2 reduce shard task and send the shard db to new gid
-// 	for _, shard := range redShardTasks {
-// 		// kv.shardKvStore.setStatus(shard, ConfigWaiting)
-// 		kv.SendShard(shard, newConfig)
-// 	}
-// 	if len(redShardTasks) > 0 && len(addShardTasks) == 0 {
-// 		kv.status = ConfigWaiting
-// 		kv.appendUpdateConfig(newConfig)
-// 	} else {
-// 		kv.status = ConfigWaiting
-// 	}
-// 	// kv.appendUpdateConfig(newConfig)
-// }
-
 func (kv *ShardKV) checkShardTaskWithoutLOCK(key string) bool {
 	shardTask := key2shard(key)
 	return kv.config.Shards[shardTask] == kv.gid
-}
-
-func (kv *ShardKV) queryConfigWithoutLOCK() {
-	kv.config = kv.sm.Query(0)
-	// for shardID, gid := range kv.config.Shards {
-	// 	if gid == kv.gid {
-	// 		kv.shardTasks[shardID] = struct{}{}
-	// 	}
-	// }
 }
 
 // 每隔一段时间取查看configuration
@@ -734,9 +661,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.deletingShard = make([]int, 0)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.status = ConfigNormal
-	kv.shardTasks = make(map[int]struct{})
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
-	kv.queryConfigWithoutLOCK()
+	kv.config = kv.sm.Query(0)
 	kv.shardKvStore = newShardKvStore(10)
 	kv.clientCh = make(map[int64]map[int64]chan int64)
 	kv.lastCommandID = make(map[int64]int64)

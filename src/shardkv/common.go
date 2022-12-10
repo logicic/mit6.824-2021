@@ -58,7 +58,8 @@ type Err string
 type shardKvStore []*shardKvDB
 
 type shardKvDB struct {
-	ShardID int
+	Shard   int
+	ID      int64
 	Status  int
 	KvStore map[string]string
 }
@@ -81,8 +82,9 @@ func newShardKvStore(shardNum int) shardKvStore {
 	dbs := make(shardKvStore, shardNum)
 	for id := range dbs {
 		db := &shardKvDB{
-			ShardID: id,
+			Shard:   id,
 			KvStore: make(map[string]string),
+			ID:      nrand(),
 		}
 		dbs[id] = db
 	}
@@ -110,7 +112,7 @@ func (db shardKvStore) deleteBatch(shards []int) {
 
 func (db shardKvStore) shard(shard int) shardKvDB {
 	returndb := shardKvDB{
-		ShardID: shard,
+		Shard:   shard,
 		KvStore: make(map[string]string),
 	}
 	for k, v := range db[shard].KvStore {
@@ -120,7 +122,7 @@ func (db shardKvStore) shard(shard int) shardKvDB {
 }
 
 func (db shardKvStore) install(shard int, sdb shardKvDB) {
-	db[shard].ShardID = shard
+	db[shard].Shard = shard
 	for k, v := range sdb.KvStore {
 		db[shard].KvStore[k] = v
 	}
@@ -156,6 +158,10 @@ func (db shardKvStore) isNormal() bool {
 	return ok
 }
 
+func (db shardKvStore) id(shard int) int64 {
+	return db[shard].ID
+}
+
 // func (db shardKvStore) allStatus() bool {
 // 	for shard := range db {
 // 		fmt.Printf("db[shard].Status:%v\n", db[shard].Status)
@@ -170,7 +176,7 @@ func (db shardKvStore) setStatus(shard int, status int) {
 }
 func (db shardKvStore) print(gid, me int) {
 	for i := range db {
-		DPrintf("############## gid:%d kv:%d db[%d]:%v", gid, me, db[i].ShardID, db[i].KvStore)
+		DPrintf("############## gid:%d kv:%d db[%d]:%v", gid, me, db[i].Shard, db[i].KvStore)
 	}
 }
 
