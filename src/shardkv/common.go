@@ -1,7 +1,6 @@
 package shardkv
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -52,10 +51,11 @@ type Err string
 type shardKvStore []*shardKvDB
 
 type shardKvDB struct {
-	Shard   int
-	ID      int64
-	Status  int
-	KvStore map[string]string
+	Shard               int
+	ID                  int64
+	Status              int
+	KvStore             map[string]string
+	LastClientCommandID map[int64]int64
 }
 
 func (db *shardKvDB) get(key string) (value string, ok bool) {
@@ -76,9 +76,10 @@ func newShardKvStore(shardNum int) shardKvStore {
 	dbs := make(shardKvStore, shardNum)
 	for id := range dbs {
 		db := &shardKvDB{
-			Shard:   id,
-			KvStore: make(map[string]string),
-			ID:      nrand(),
+			Shard:               id,
+			KvStore:             make(map[string]string),
+			ID:                  nrand(),
+			LastClientCommandID: make(map[int64]int64),
 		}
 		dbs[id] = db
 	}
@@ -100,23 +101,42 @@ func (db shardKvStore) append(shard int, key, value string) {
 
 func (db shardKvStore) delete(shard int) {
 	db[shard].clear()
+	db[shard].LastClientCommandID = make(map[int64]int64)
 }
 
 func (db shardKvStore) shard(shard int) shardKvDB {
 	returndb := shardKvDB{
-		Shard:   shard,
-		KvStore: make(map[string]string),
+		Shard:               shard,
+		KvStore:             make(map[string]string),
+		LastClientCommandID: make(map[int64]int64),
 	}
+	returndb.Status = db[shard].Status
 	for k, v := range db[shard].KvStore {
 		returndb.KvStore[k] = v
 	}
+	for k, v := range db[shard].LastClientCommandID {
+		returndb.LastClientCommandID[k] = v
+	}
 	return returndb
+}
+
+func (db shardKvStore) shardSlice(status int) []int {
+	slice := []int{}
+	for shard := range db {
+		if db[shard].Status == status {
+			slice = append(slice, shard)
+		}
+	}
+	return slice
 }
 
 func (db shardKvStore) install(shard int, sdb shardKvDB) {
 	db[shard].Shard = shard
 	for k, v := range sdb.KvStore {
 		db[shard].KvStore[k] = v
+	}
+	for k, v := range sdb.LastClientCommandID {
+		db[shard].LastClientCommandID[k] = v
 	}
 }
 
@@ -167,8 +187,33 @@ func (db shardKvStore) setStatus(shard int, status int) {
 }
 func (db shardKvStore) print(gid, me int) {
 	for i := range db {
-		fmt.Printf("############## gid:%d kv:%d status:%v db[%d]:%v\n", gid, me, db[i].Status, db[i].Shard, db[i].KvStore)
+		DPrintf("############## gid:%d kv:%d status:%v db[%d]:%v\n", gid, me, db[i].Status, db[i].Shard, db[i].KvStore)
 	}
+}
+
+func (db shardKvStore) checkCommandIDWithoutLOCK(shard int, clientID, commandID int64) bool {
+	lcID, ok := db[shard].LastClientCommandID[clientID]
+	if !ok {
+		lcID = -1
+		db[shard].LastClientCommandID[clientID] = -1
+	}
+	if lcID >= commandID {
+		return false
+	}
+	return true
+}
+
+func (db shardKvStore) setCommandIDWithoutLOCK(shard int, clientID, commandID int64) {
+	db[shard].LastClientCommandID[clientID] = commandID
+}
+
+func (db shardKvStore) getCommandIDWithoutLOCK(shard int, clientID int64) int64 {
+	lcID, ok := db[shard].LastClientCommandID[clientID]
+	if !ok {
+		lcID = -1
+		db[shard].LastClientCommandID[clientID] = -1
+	}
+	return lcID
 }
 
 func (db shardKvStore) deepcopy(src shardKvStore) {
@@ -178,6 +223,9 @@ func (db shardKvStore) deepcopy(src shardKvStore) {
 		db[shard].Status = src[shard].Status
 		for k, v := range src[shard].KvStore {
 			db[shard].KvStore[k] = v
+		}
+		for k, v := range src[shard].LastClientCommandID {
+			db[shard].LastClientCommandID[k] = v
 		}
 	}
 }

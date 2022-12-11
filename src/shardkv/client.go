@@ -173,7 +173,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					break
 				}
 
-				if reply.Err == ErrSendAgain {
+				if ok && reply.Err == ErrSendAgain {
 					// ck.nextCommandID++
 					// args.CommandID = ck.nextCommandID
 					break

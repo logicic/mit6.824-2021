@@ -2,7 +2,6 @@ package shardkv
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -50,19 +49,19 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	dead          int32 // set by Kill()
-	sm            *shardctrler.Clerk
-	config        shardctrler.Config
-	lastConfig    shardctrler.Config
-	shardKvStore  shardKvStore
-	clientCh      map[int64]map[int64]chan int64
-	lastCommandID map[int64]int64
-	deletingShard []int
+	dead            int32 // set by Kill()
+	sm              *shardctrler.Clerk
+	config          shardctrler.Config
+	lastConfig      shardctrler.Config
+	shardKvStore    shardKvStore
+	clientCh        map[int64]map[int64]chan int64
+	deletingShard   []int
+	shardsMigrateWG *sync.WaitGroup
 }
 
 type snapshotData struct {
 	KvStore       shardKvStore
-	LastCommandID map[int64]int64
+	DeletingShard []int
 	Config        shardctrler.Config
 	LastConfig    shardctrler.Config
 }
@@ -82,10 +81,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	if !isLeader1 {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
-		DPrintf("[Server] <Get> gid: %d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		return
 	}
-	if args.ConfigNum != kv.config.Num {
+	if args.ConfigNum != kv.config.Num || args.ConfigNum == 0 {
 		kv.mu.Unlock()
 		reply.Err = ErrWrongGroup
 		return
@@ -93,7 +91,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// 0. check shard
 	shardTask := key2shard(command.Key)
 	if kv.config.Shards[shardTask] != kv.gid {
-		DPrintf("[Server] <Get> ErrWrongGroup gid:%d  %d recv %v\n", kv.gid, kv.me, args)
 		kv.mu.Unlock()
 		reply.Err = ErrWrongGroup
 		return
@@ -105,7 +102,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	// 1. check duplicate and out-date data
-	if !kv.checkCommandIDWithoutLOCK(command) {
+	if !kv.shardKvStore.checkCommandIDWithoutLOCK(command.ShardTask, command.ClientID, command.CommandID) {
 		reply.Err = OK
 		value, ok := kv.shardKvStore.get(shardTask, command.Key)
 		if !ok {
@@ -121,18 +118,14 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
-	if !isLeader1 || !isLeader2 {
+	if !isLeader2 {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
-		DPrintf("[Server] <Get> gid: %d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		return
 	}
-
-	DPrintf("[Server] <Get> gid:%d begin![%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	kv.mu.Unlock()
-	DPrintf("[Server] <Get> gid:%d WAIT commandCH[%d]!", kv.gid, kv.me)
 	reply.Err = OK
 
 	// 4. wait the command data from channel
@@ -141,7 +134,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		if applyCom == Waiting {
 			// return
 			reply.Err = ErrSendAgain
-			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, args.CommandID)
+			DPrintf("[Server] <Get> gid:%d %d finish! ClientID[%d] ComandID[%d] Err:%s\n", kv.gid, kv.me, args.ClientID, args.CommandID, reply.Err)
 			return
 		}
 		kv.mu.Lock()
@@ -181,11 +174,10 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	term, isLeader1 := kv.rf.GetState()
 	if !isLeader1 {
 		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <PutAppend> gid:%d  follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		kv.mu.Unlock()
 		return
 	}
-	if args.ConfigNum != kv.config.Num {
+	if args.ConfigNum != kv.config.Num || args.ConfigNum == 0 {
 		kv.mu.Unlock()
 		reply.Err = ErrWrongGroup
 		return
@@ -204,7 +196,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	// 1. check duplicate and out-date data
-	if !kv.checkCommandIDWithoutLOCK(command) {
+	if !kv.shardKvStore.checkCommandIDWithoutLOCK(command.ShardTask, command.ClientID, command.CommandID) {
 		kv.mu.Unlock()
 		reply.Err = OK
 		return
@@ -216,22 +208,17 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
 		reply.Err = ErrWrongLeader
-		DPrintf("[Server] <PutAppend> gid:%d  follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		kv.mu.Unlock()
 		return
 	}
-	DPrintf("[Server] <PutAppend> gid:%d begin![%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	// 3. get command channel
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	kv.mu.Unlock()
-	DPrintf("[Server] <PutAppend> gid:%d WAIT commandCH[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 	reply.Err = OK
 	// 4. wait the command data from channel
 	select {
 	case applyCom := <-commandCh:
 		if applyCom == Waiting {
-			// return
-			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, args.CommandID)
 			reply.Err = ErrSendAgain
 		}
 	case <-time.After(ExecuteTimeout):
@@ -244,20 +231,21 @@ func (kv *ShardKV) updateKVWithoutLOCK(op Op) {
 	if op.Op == 1 {
 		// Put
 		kv.shardKvStore.put(op.ShardTask, op.Key, op.Value)
-		DPrintf("[Server] <applier> gid:%d %d op:[PUT] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
+		DPrintf("[Server] <updateKVWithoutLOCK> gid:%d %d op:[PUT] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
 	} else if op.Op == 2 {
 		// Append
 		kv.shardKvStore.append(op.ShardTask, op.Key, op.Value)
-		DPrintf("[Server] <applier> gid:%d %d op:[APPEND] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
+		DPrintf("[Server] <updateKVWithoutLOCK> gid:%d %d op:[APPEND] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
 	} else if op.Op == 0 {
 		// GET
-		DPrintf("[Server] <applier> gid:%d %d op:[GET] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
+		DPrintf("[Server] <updateKVWithoutLOCK> gid:%d %d op:[GET] clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
 	}
 	kv.shardKvStore.print(kv.gid, kv.me)
-	kv.lastCommandID[op.ClientID] = op.CommandID
+	kv.shardKvStore.setCommandIDWithoutLOCK(op.ShardTask, op.ClientID, op.CommandID)
 }
 
 func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
+	DPrintf("[Server] <updateConfigWithoutLOCK> gid:%d %d current config:%d new config:%d\n", kv.gid, kv.me, kv.config.Num, op.Config.Num)
 	if kv.config.Num < op.Config.Num {
 		// update shard status
 		kv.shardKvStore.clearStatus()
@@ -275,25 +263,22 @@ func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
 		kv.lastConfig = kv.config
 		kv.config = op.Config
 	}
-	kv.lastCommandID[op.ClientID] = op.CommandID
 }
 
 func (kv *ShardKV) installShardWithoutLOCK(op Op) {
 	if kv.config.Num <= op.Config.Num {
 		kv.shardKvStore.install(op.ShardTask, op.DB)
 	}
-	fmt.Printf("gid: %d me:%d UNlock shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
-	kv.lastCommandID[op.ClientID] = op.CommandID
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
+	DPrintf("[Server] <installShardWithoutLOCK> gid: %d me:%d Install shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
 }
 
 func (kv *ShardKV) deleteShardWithoutLOCK(op Op) {
 	if kv.config.Num <= op.Config.Num {
 		kv.shardKvStore.delete(op.ShardTask)
 	}
-	fmt.Printf("gid: %d me:%d delete shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
-	kv.lastCommandID[op.ClientID] = op.CommandID
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
+	DPrintf("[Server] <deleteShardWithoutLOCK> gid: %d me:%d delete shard: %d db:%v\n", kv.gid, kv.me, op.ShardTask, kv.shardKvStore.shard(op.ShardTask))
 }
 
 func (kv *ShardKV) makeCommandChanWithoutLOCK(op Op) chan int64 {
@@ -329,23 +314,11 @@ func (kv *ShardKV) deleteCommandChanWithoutLOCK(op Op) {
 	}
 }
 
-func (kv *ShardKV) checkCommandIDWithoutLOCK(op Op) bool {
-	lcID, ok := kv.lastCommandID[op.ClientID]
-	if !ok {
-		lcID = -1
-		kv.lastCommandID[op.ClientID] = -1
-	}
-	if lcID >= op.CommandID {
-		return false
-	}
-	return true
-}
-
 func (kv *ShardKV) snapshotWithoutLOCK(commandIndex int) {
 	if kv.rf.RaftStateSize() > kv.maxraftstate && kv.maxraftstate > -1 {
 		data := snapshotData{
 			KvStore:       newShardKvStore(10),
-			LastCommandID: kv.lastCommandID,
+			DeletingShard: kv.deletingShard,
 			Config:        kv.config,
 			LastConfig:    kv.lastConfig,
 		}
@@ -365,34 +338,10 @@ func (kv *ShardKV) readsnapshotWithoutLOCK(snapshot []byte) {
 			log.Fatalf("decode error\n")
 		}
 		kv.shardKvStore.deepcopy(data.KvStore)
-		kv.lastCommandID = data.LastCommandID
 		kv.config = data.Config
 		kv.lastConfig = data.LastConfig
+		copy(kv.deletingShard, data.DeletingShard)
 	}
-}
-
-func (kv *ShardKV) doCommandWithoutLOCK(op Op) bool {
-	switch op.CommandType {
-	case ExecuteCommandType:
-		if kv.shardKvStore.status(op.ShardTask) != ShardNormal {
-			fmt.Printf("!!!!!!!!!!gid:%d me:%d value:%v\n", kv.gid, kv.me, op.Value)
-			return false
-		}
-		shardTask := key2shard(op.Key)
-		if kv.config.Shards[shardTask] != kv.gid {
-			DPrintf("[Server] doCommandWithoutLOCK gid:%d  %d key:%s value:%s\n", kv.gid, kv.me, op.Key, op.Value)
-			return false
-		}
-
-		kv.updateKVWithoutLOCK(op)
-	case InstallShardCommandType:
-		kv.installShardWithoutLOCK(op)
-	case DeleteShardCommandType:
-		kv.deleteShardWithoutLOCK(op)
-	case UpdateConfigCommandType:
-		kv.updateConfigWithoutLOCK(op)
-	}
-	return true
 }
 
 func (kv *ShardKV) applier() {
@@ -409,44 +358,56 @@ func (kv *ShardKV) applier() {
 				}
 
 			} else if m.CommandValid {
-				fmt.Printf("gid:%d %d applyCh:%v\n", kv.gid, kv.me, m)
+				DPrintf("gid:%d %d applyCh:%v\n", kv.gid, kv.me, m)
 				op := m.Command.(Op)
-				// fmt.Printf("gid:%d %d commandID:%d key:%s value:%s\n", kv.gid, kv.me, op.ComandID, op.)
 				kv.mu.Lock()
 				// 1. check commandID
 				// 2. only the new one can update keyvalue db
-				if kv.checkCommandIDWithoutLOCK(op) {
-					// 2.1 update k-v
-					ok := true
-					if !kv.doCommandWithoutLOCK(op) {
-						ok = false
-					}
-					// 2.2 get command channel
-					// 3. snapshot
-					kv.snapshotWithoutLOCK(m.CommandIndex)
-					commandCh := kv.getCommandChanWithoutLOCK(op)
-					kv.mu.Unlock()
-					if commandCh != nil {
-						DPrintf("[Server] <applier> gid:%d %d enter rf.GetState clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
-						// 2.3 only leader role can send data to channel
-						if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
-							DPrintf("[Server] <applier> gid: %d %d sendback1 clientID[%d] commandID[%d]\n", kv.gid, kv.me, op.ClientID, op.CommandID)
-							// commandCh <- op.CommandID
-							sendCommandID := op.CommandID
-							if !ok {
-								sendCommandID = Waiting
-							}
-							select {
-							case commandCh <- sendCommandID:
-							case <-time.After(1 * time.Second):
-							}
-							DPrintf("[Server] <applier> %d sendback2 clientID[%d] commandID[%d]\n", kv.me, op.ClientID, op.CommandID)
+				ok := true
+				switch op.CommandType {
+				case ExecuteCommandType:
+					if kv.shardKvStore.checkCommandIDWithoutLOCK(op.ShardTask, op.ClientID, op.CommandID) {
+						if kv.shardKvStore.status(op.ShardTask) != ShardNormal {
+							ok = false
+							break
 						}
-						kv.mu.Lock()
-						kv.deleteCommandChanWithoutLOCK(op)
+						shardTask := key2shard(op.Key)
+						if kv.config.Shards[shardTask] != kv.gid {
+							ok = false
+							break
+						}
+
+						kv.updateKVWithoutLOCK(op)
+					} else {
 						kv.mu.Unlock()
+						continue
 					}
-				} else {
+				case InstallShardCommandType:
+					kv.installShardWithoutLOCK(op)
+				case DeleteShardCommandType:
+					kv.deleteShardWithoutLOCK(op)
+				case UpdateConfigCommandType:
+					kv.updateConfigWithoutLOCK(op)
+				}
+
+				kv.snapshotWithoutLOCK(m.CommandIndex)
+				commandCh := kv.getCommandChanWithoutLOCK(op)
+				kv.mu.Unlock()
+				if commandCh != nil {
+					// 2.3 only leader role can send data to channel
+					if term, isLeader := kv.rf.GetState(); isLeader && op.Term >= term {
+						// commandCh <- op.CommandID
+						sendCommandID := op.CommandID
+						if !ok {
+							sendCommandID = Waiting
+						}
+						select {
+						case commandCh <- sendCommandID:
+						case <-time.After(1 * time.Second):
+						}
+					}
+					kv.mu.Lock()
+					kv.deleteCommandChanWithoutLOCK(op)
 					kv.mu.Unlock()
 				}
 			}
@@ -455,10 +416,11 @@ func (kv *ShardKV) applier() {
 }
 
 func (kv *ShardKV) appendUpdateConfig(config shardctrler.Config) {
+	DPrintf("[Server] <appendUpdateConfig> gid: %d me:%d append newconfig: %v\n", kv.gid, kv.me, config)
 	command := Op{
 		CommandType: UpdateConfigCommandType,
 		ClientID:    int64(kv.gid),
-		CommandID:   kv.lastCommandID[int64(kv.gid)] + 1,
+		CommandID:   nrand(),
 		Config:      config,
 	}
 
@@ -466,26 +428,24 @@ func (kv *ShardKV) appendUpdateConfig(config shardctrler.Config) {
 	command.Term = term
 	_, term, isLeader2 := kv.rf.Start(command)
 	if !isLeader1 || !isLeader2 {
+		kv.mu.Unlock()
 		return
 	}
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	kv.mu.Unlock()
 	select {
-	case applyCom := <-commandCh:
-		if applyCom != command.CommandID {
-			// return
-			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, command.CommandID)
-		}
+	case <-commandCh:
 	case <-time.After(ExecuteTimeout):
 	}
 }
 
 func (kv *ShardKV) appendDelete(config shardctrler.Config, shard int) {
 	kv.mu.Lock()
+	DPrintf("[Server] <appendDelete> gid: %d me:%d delete shard: %d when config:%d\n", kv.gid, kv.me, shard, config.Num)
 	command := Op{
 		CommandType: DeleteShardCommandType,
 		ClientID:    kv.shardKvStore.id(shard),
-		CommandID:   kv.lastCommandID[kv.shardKvStore.id(shard)] + 1,
+		CommandID:   kv.shardKvStore.getCommandIDWithoutLOCK(shard, kv.shardKvStore.id(shard)) + 1,
 		Config:      config,
 		ShardTask:   shard,
 	}
@@ -499,11 +459,7 @@ func (kv *ShardKV) appendDelete(config shardctrler.Config, shard int) {
 	commandCh := kv.makeCommandChanWithoutLOCK(command)
 	kv.mu.Unlock()
 	select {
-	case applyCom := <-commandCh:
-		if applyCom != command.CommandID {
-			// return
-			DPrintf("%d applyCom:%v commandID:%d\n", kv.me, applyCom, command.CommandID)
-		}
+	case <-commandCh:
 	case <-time.After(ExecuteTimeout):
 	}
 }
@@ -542,6 +498,7 @@ func (kv *ShardKV) shardTaskMoved(curConfig, newConfig shardctrler.Config) (addS
 			redShardTasks = append(redShardTasks, shardId)
 		}
 	}
+	DPrintf("[Server] <shardTaskMoved> gid:%d %d current config:%d new config:%d addShard:%v redShard:%v\n", kv.gid, kv.me, curConfig.Num, newConfig.Num, addShardTasks, redShardTasks)
 	return
 }
 
@@ -563,7 +520,6 @@ func (kv *ShardKV) ticker(run func()) {
 
 func (kv *ShardKV) configMove() {
 	kv.mu.Lock()
-	fmt.Printf("[Server] <configMove> me[%d] sendergid:%d config[%d]\n", kv.me, kv.gid, kv.config.Num)
 	curConfig := kv.config
 	newConfig := kv.sm.Query(curConfig.Num + 1)
 	if newConfig.Num <= curConfig.Num {
@@ -574,6 +530,7 @@ func (kv *ShardKV) configMove() {
 	// check shardDB status
 	kv.shardKvStore.print(kv.gid, kv.me)
 	if kv.shardKvStore.isNormal() {
+		DPrintf("[Server] <configMove> gid:%d %d update config[%d]\n", kv.gid, kv.me, kv.config.Num)
 		kv.appendUpdateConfig(newConfig)
 	} else {
 		kv.mu.Unlock()
@@ -581,44 +538,40 @@ func (kv *ShardKV) configMove() {
 }
 
 func (kv *ShardKV) shardMove() {
+	kv.shardsMigrateWG.Wait()
 	kv.mu.Lock()
-	fmt.Printf("[Server] <shardMove> me[%d] sendergid:%d config[%d] kv.deletingShard:%v\n", kv.me, kv.gid, kv.config.Num, kv.deletingShard)
-	redShard := make([]int, len(kv.deletingShard))
-	copy(redShard, kv.deletingShard)
+	redShard := kv.shardKvStore.shardSlice(ShardSending)
+	kv.mu.Unlock()
+	DPrintf("[Server] <shardMove> me[%d] gid:%d config[%d] kv.deletingShard:%v\n", kv.me, kv.gid, kv.config.Num, redShard)
 	for _, shard := range redShard {
-		if kv.shardKvStore.status(shard) == ShardSending {
+		kv.shardsMigrateWG.Add(1)
+		go func(shard int) {
+			kv.mu.Lock()
 			args := InstallShardArgs{
 				ClientID:  kv.shardKvStore.id(shard),
-				CommandID: kv.lastCommandID[kv.shardKvStore.id(shard)] + 1,
+				CommandID: kv.shardKvStore.getCommandIDWithoutLOCK(shard, kv.shardKvStore.id(shard)) + 1,
 				DB:        kv.shardKvStore.shard(shard),
 				ShardNum:  shard,
 				Config:    kv.config,
 			}
+			kv.mu.Unlock()
 			gid := args.Config.Shards[args.ShardNum]
 			if servers, ok := args.Config.Groups[gid]; ok {
-				kv.mu.Unlock()
 				for si := 0; si < len(servers); si++ {
 					srv := kv.make_end(servers[si])
 					var reply InstallShardReply
 					ok := srv.Call("ShardKV.InstallShard", &args, &reply)
+					DPrintf("[Server] <shardMove> me[%d] sendergid:%d config[%d] recvgid:%d recvme:%d\n", kv.me, kv.gid, args.Config.Num, gid, si)
 					if ok && reply.Err == OK {
 						kv.appendDelete(args.Config, args.ShardNum)
-						return
-					}
-					// ... not ok, or ErrWrongLeader
-					if ok && reply.Err == ErrWrongLeader {
-						continue
-					}
-
-					if ok && reply.Err == ErrShardWaiting {
 						break
 					}
 				}
-				kv.mu.Lock()
 			}
-		}
+			kv.shardsMigrateWG.Done()
+		}(shard)
 	}
-	kv.mu.Unlock()
+	kv.shardsMigrateWG.Wait()
 }
 
 //
@@ -681,18 +634,19 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-	fmt.Printf("gid: %d me: %d aassda\n", kv.gid, kv.me)
+	DPrintf("gid: %d me: %d begin!\n", kv.gid, kv.me)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.deletingShard = make([]int, 0)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.config = kv.sm.Query(0)
 	kv.lastConfig = kv.sm.Query(0)
+	kv.shardsMigrateWG = &sync.WaitGroup{}
 	kv.shardKvStore = newShardKvStore(10)
 	kv.clientCh = make(map[int64]map[int64]chan int64)
-	kv.lastCommandID = make(map[int64]int64)
 	snapshot := kv.rf.ReadSnapshot()
 	kv.readsnapshotWithoutLOCK(snapshot)
+	DPrintf("gid:%d me:%d configNum:%d addShard:%v redShard:%d\n", kv.gid, kv.me, kv.config.Num, kv.shardKvStore.shardSlice(ShardWaiting), kv.shardKvStore.shardSlice(ShardSending))
 	go kv.ticker(kv.configMove)
 	go kv.ticker(kv.shardMove)
 	go kv.applier()
