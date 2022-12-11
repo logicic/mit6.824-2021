@@ -86,6 +86,7 @@ func (ck *Clerk) Get(key string) string {
 	}
 
 	for {
+		args.ConfigNum = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		// fmt.Printf("[Client] <Get> gid:%d kv:%d config:%v At:%v\n", gid, args.ClientID, ck.config, time.Now())
@@ -145,6 +146,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 
 	for {
+		args.ConfigNum = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		// fmt.Printf("[Client] <PutAppend> gid:%d kv:%d config:%v At:%v\n", gid, args.ClientID, ck.config, time.Now())

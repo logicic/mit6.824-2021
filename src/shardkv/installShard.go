@@ -18,66 +18,6 @@ type InstallShardReply struct {
 	Err Err
 }
 
-// send shard to matched gid servers
-func (kv *ShardKV) SendShard(shardNum int, config shardctrler.Config) {
-	kv.mu.Lock()
-	// defer kv.mu.Unlock()
-	gid := config.Shards[shardNum]
-	args := InstallShardArgs{
-		ClientID:  kv.shardKvStore.id(shardNum),
-		CommandID: kv.lastCommandID[kv.shardKvStore.id(shardNum)] + 1,
-		DB:        kv.shardKvStore.shard(shardNum),
-		ShardNum:  shardNum,
-		Config:    config,
-	}
-	kv.mu.Unlock()
-	for {
-		_, isLeader1 := kv.rf.GetState()
-		if !isLeader1 {
-			return
-		}
-		ok := false
-		kv.mu.Lock()
-		for _, sh := range kv.deletingShard {
-			if sh == shardNum {
-				ok = true
-				break
-			}
-		}
-		kv.mu.Unlock()
-		if !ok {
-			return
-		}
-		fmt.Printf("SendShard gid:%d kv:%d config:%v At:%v\n", kv.gid, kv.me, config, time.Now())
-		DPrintf("[Client] <SendShard> client[%d] send to gid[%d] try shard:%d db:%v commandID:%d\n", args.ClientID, gid, shardNum, args.DB, args.CommandID)
-		if servers, ok := config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := kv.make_end(servers[si])
-				var reply InstallShardReply
-				ok := srv.Call("ShardKV.InstallShard", &args, &reply)
-				if ok && reply.Err == OK {
-					kv.mu.Lock()
-					kv.lastCommandID[args.ClientID] = args.CommandID
-					kv.shardKvStore.setStatus(shardNum, ShardNormal)
-					kv.mu.Unlock()
-					return
-				}
-				// ... not ok, or ErrWrongLeader
-				if ok && reply.Err == ErrWrongLeader {
-					fmt.Printf("ErrWrongLeaderSendShard gid:%d kv:%d config:%v servers:%d\n", kv.gid, kv.me, config, si)
-					continue
-				}
-
-				if ok && reply.Err == ErrShardWaiting {
-					break
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
-	}
-}
-
 func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply) {
 	command := Op{
 		CommandType: InstallShardCommandType,
@@ -96,25 +36,24 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 		kv.mu.Unlock()
 		return
 	}
-	if args.Config.Num <= kv.config.Num {
-		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
-		kv.mu.Unlock()
-		reply.Err = OK
-		return
-	}
+	fmt.Printf("[Server] <InstallShard> compare me[%d] sendergid:%d config[%d] recvgid[%d] config[%d]\n", kv.me, kv.gid, kv.config.Num, args.ClientID, args.Config.Num)
 	// 1. check duplicate and out-date data
 	if !kv.checkCommandIDWithoutLOCK(command) {
-		kv.shardKvStore.setStatus(command.ShardTask, ShardNormal)
 		kv.mu.Unlock()
 		reply.Err = OK
 		return
 	}
 	// 2. check leader role and append logEntry
 
-	if kv.shardKvStore.status(args.ShardNum) != ShardWaiting {
+	if args.Config.Num != kv.config.Num {
 		reply.Err = ErrShardWaiting
 		fmt.Printf("[Server] <InstallShard> ErrShardWaiting gid:%d follower[%d]! ClientID[%d] ComandID[%d]\n", kv.gid, kv.me, args.ClientID, args.CommandID)
 		kv.mu.Unlock()
+		return
+	}
+	if kv.shardKvStore.status(args.ShardNum) == ShardNormal {
+		kv.mu.Unlock()
+		reply.Err = OK
 		return
 	}
 	command.Term = term

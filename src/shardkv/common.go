@@ -1,7 +1,7 @@
 package shardkv
 
 import (
-	// "fmt"
+	"fmt"
 	"time"
 )
 
@@ -43,12 +43,6 @@ const (
 // )
 const Waiting = -101
 const (
-	ConfigNormal   = 10
-	ConfigRunning  = 11
-	ConfigUpdate   = 12
-	ConfigUpdating = 13
-	ConfigFollower = 14
-
 	ShardNormal  = 0
 	ShardWaiting = 15
 	ShardSending = 16
@@ -104,10 +98,8 @@ func (db shardKvStore) append(shard int, key, value string) {
 	db[shard].KvStore[key] = db[shard].KvStore[key] + value
 }
 
-func (db shardKvStore) deleteBatch(shards []int) {
-	for _, shard := range shards {
-		db[shard].clear()
-	}
+func (db shardKvStore) delete(shard int) {
+	db[shard].clear()
 }
 
 func (db shardKvStore) shard(shard int) shardKvDB {
@@ -150,7 +142,6 @@ func (db shardKvStore) checkStatus(status int) bool {
 func (db shardKvStore) isNormal() bool {
 	ok := true
 	for shard := range db {
-		// fmt.Printf("db[%d].Status:%v\n", shard, db[shard].Status)
 		if db[shard].Status != ShardNormal {
 			ok = false
 		}
@@ -176,7 +167,18 @@ func (db shardKvStore) setStatus(shard int, status int) {
 }
 func (db shardKvStore) print(gid, me int) {
 	for i := range db {
-		DPrintf("############## gid:%d kv:%d db[%d]:%v", gid, me, db[i].Shard, db[i].KvStore)
+		fmt.Printf("############## gid:%d kv:%d status:%v db[%d]:%v\n", gid, me, db[i].Status, db[i].Shard, db[i].KvStore)
+	}
+}
+
+func (db shardKvStore) deepcopy(src shardKvStore) {
+	for shard := range src {
+		db[shard].ID = src[shard].ID
+		db[shard].Shard = src[shard].Shard
+		db[shard].Status = src[shard].Status
+		for k, v := range src[shard].KvStore {
+			db[shard].KvStore[k] = v
+		}
 	}
 }
 
@@ -191,6 +193,7 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	ClientID  int64
 	CommandID int64
+	ConfigNum int
 }
 
 type PutAppendReply struct {
@@ -202,6 +205,7 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	ClientID  int64
 	CommandID int64
+	ConfigNum int
 }
 
 type GetReply struct {
