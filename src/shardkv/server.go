@@ -29,6 +29,7 @@ type Op struct {
 	CommandType int
 	ShardTask   int
 	Config      shardctrler.Config
+	ConfigNum   int
 	DB          shardKvDB
 	Op          int
 	Key         string
@@ -55,15 +56,13 @@ type ShardKV struct {
 	lastConfig      shardctrler.Config
 	shardKvStore    shardKvStore
 	clientCh        map[int64]map[int64]chan int64
-	deletingShard   []int
 	shardsMigrateWG *sync.WaitGroup
 }
 
 type snapshotData struct {
-	KvStore       shardKvStore
-	DeletingShard []int
-	Config        shardctrler.Config
-	LastConfig    shardctrler.Config
+	KvStore shardKvStore
+	Config  shardctrler.Config
+	// LastConfig shardctrler.Config
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -258,7 +257,6 @@ func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
 			for _, shard := range redShard {
 				kv.shardKvStore.setStatus(shard, ShardSending)
 			}
-			kv.deletingShard = redShard
 		}
 		kv.lastConfig = kv.config
 		kv.config = op.Config
@@ -266,7 +264,7 @@ func (kv *ShardKV) updateConfigWithoutLOCK(op Op) {
 }
 
 func (kv *ShardKV) installShardWithoutLOCK(op Op) {
-	if kv.config.Num <= op.Config.Num {
+	if kv.config.Num <= op.ConfigNum {
 		kv.shardKvStore.install(op.ShardTask, op.DB)
 	}
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
@@ -274,7 +272,7 @@ func (kv *ShardKV) installShardWithoutLOCK(op Op) {
 }
 
 func (kv *ShardKV) deleteShardWithoutLOCK(op Op) {
-	if kv.config.Num <= op.Config.Num {
+	if kv.config.Num <= op.ConfigNum {
 		kv.shardKvStore.delete(op.ShardTask)
 	}
 	kv.shardKvStore.setStatus(op.ShardTask, ShardNormal)
@@ -317,10 +315,9 @@ func (kv *ShardKV) deleteCommandChanWithoutLOCK(op Op) {
 func (kv *ShardKV) snapshotWithoutLOCK(commandIndex int) {
 	if kv.rf.RaftStateSize() > kv.maxraftstate && kv.maxraftstate > -1 {
 		data := snapshotData{
-			KvStore:       newShardKvStore(10),
-			DeletingShard: kv.deletingShard,
-			Config:        kv.config,
-			LastConfig:    kv.lastConfig,
+			KvStore: newShardKvStore(10),
+			Config:  kv.config,
+			// LastConfig: kv.lastConfig,
 		}
 		data.KvStore.deepcopy(kv.shardKvStore)
 		w := new(bytes.Buffer)
@@ -339,8 +336,7 @@ func (kv *ShardKV) readsnapshotWithoutLOCK(snapshot []byte) {
 		}
 		kv.shardKvStore.deepcopy(data.KvStore)
 		kv.config = data.Config
-		kv.lastConfig = data.LastConfig
-		copy(kv.deletingShard, data.DeletingShard)
+		// kv.lastConfig = data.LastConfig
 	}
 }
 
@@ -446,7 +442,7 @@ func (kv *ShardKV) appendDelete(config shardctrler.Config, shard int) {
 		CommandType: DeleteShardCommandType,
 		ClientID:    kv.shardKvStore.id(shard),
 		CommandID:   kv.shardKvStore.getCommandIDWithoutLOCK(shard, kv.shardKvStore.id(shard)) + 1,
-		Config:      config,
+		ConfigNum:   config.Num,
 		ShardTask:   shard,
 	}
 
@@ -636,7 +632,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	DPrintf("gid: %d me: %d begin!\n", kv.gid, kv.me)
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.deletingShard = make([]int, 0)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.config = kv.sm.Query(0)

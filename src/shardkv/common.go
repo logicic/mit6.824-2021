@@ -52,8 +52,8 @@ type shardKvStore []*shardKvDB
 
 type shardKvDB struct {
 	Shard               int
-	ID                  int64
 	Status              int
+	ID                  int64
 	KvStore             map[string]string
 	LastClientCommandID map[int64]int64
 }

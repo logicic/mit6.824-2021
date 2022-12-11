@@ -24,7 +24,7 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 		CommandID:   args.CommandID,
 		ShardTask:   args.ShardNum,
 		DB:          args.DB,
-		Config:      args.Config,
+		ConfigNum:   args.Config.Num,
 	}
 
 	kv.mu.Lock()
